@@ -1,5 +1,5 @@
-// history_panel.dart implementation
 import 'package:flutter/material.dart';
+
 import '../models/battery_history.dart';
 
 class HistoryPanel extends StatelessWidget {
@@ -14,35 +14,55 @@ class HistoryPanel extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'HISTORY',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
+          children: <Widget>[
+            Text(
+              'Recent battery samples',
+              style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 12),
             SizedBox(
-              height: 120,
+              height: 280,
               child: history.isEmpty
-                  ? const Center(
-                      child: Text('No history data yet'),
+                  ? Center(
+                      child: Text(
+                        'No history captured yet',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
                     )
-                  : ListView.builder(
+                  : ListView.separated(
                       itemCount: history.length,
-                      itemBuilder: (context, index) {
-                        final entry = history[history.length - 1 - index];
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (BuildContext context, int index) {
+                        final BatteryHistory entry = history[history.length - 1 - index];
+                        final bool isCharging = entry.isCharging;
+                        final Color color = isCharging ? Colors.green : Colors.red;
                         return ListTile(
-                          leading: Icon(
-                            entry.isCharging ? Icons.bolt : Icons.battery_alert,
-                            color:
-                                entry.isCharging ? Colors.green : Colors.blue,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 2),
+                          dense: true,
+                          leading: CircleAvatar(
+                            radius: 16,
+                            backgroundColor: color.withValues(alpha: 0.14),
+                            child: Icon(
+                              isCharging ? Icons.north_east : Icons.south_east,
+                              size: 16,
+                              color: color,
+                            ),
                           ),
-                          title: Text(entry.currentFormatted),
-                          subtitle:
-                              Text('${entry.level}% • ${entry.formattedTime}'),
-                          trailing: Text('${entry.level}%'),
+                          title: Text(
+                            entry.currentFormatted,
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                          subtitle: Text(
+                            'Level ${entry.level}% at ${entry.formattedTime}',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                          trailing: Text(
+                            isCharging ? 'Charge' : 'Discharge',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelLarge
+                                ?.copyWith(color: color),
+                          ),
                         );
                       },
                     ),
