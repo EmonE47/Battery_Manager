@@ -1,19 +1,21 @@
 import 'dart:async';
+import 'dart:math';
+
 import 'package:flutter/services.dart';
+
 import '../models/battery_data.dart';
 import '../models/battery_history.dart';
 
 class RealBatteryService {
-  static const platform = MethodChannel('com.example.battery_analyzer/battery');
-  static const eventChannel =
+  static const MethodChannel _platform =
+      MethodChannel('com.example.battery_analyzer/battery');
+  static const EventChannel _eventChannel =
       EventChannel('com.example.battery_analyzer/battery_events');
 
   final StreamController<BatteryData> _batteryDataController =
       StreamController<BatteryData>.broadcast();
-
   final StreamController<List<BatteryHistory>> _historyController =
       StreamController<List<BatteryHistory>>.broadcast();
-
   final StreamController<List<String>> _logController =
       StreamController<List<String>>.broadcast();
 
@@ -21,471 +23,615 @@ class RealBatteryService {
   Stream<List<BatteryHistory>> get historyStream => _historyController.stream;
   Stream<List<String>> get logStream => _logController.stream;
 
-  List<BatteryHistory> _history = [];
-  List<String> _logs = [];
+  final Duration _updateInterval = const Duration(seconds: 1);
+  final int _maxHistory = 360;
+  final int _maxLogs = 150;
+  final int _maxCapacitySamples = 32;
+
+  final List<BatteryHistory> _history = <BatteryHistory>[];
+  final List<String> _logs = <String>[];
+  final List<double> _capacitySamples = <double>[];
+
+  StreamSubscription<dynamic>? _eventSubscription;
   Timer? _monitoringTimer;
 
-  final int _maxHistory = 50;
-  final Duration _updateInterval = const Duration(seconds: 1);
+  DateTime? _lastSampleTime;
+  DateTime? _phaseStartTime;
+  bool? _activePhaseCharging;
+
+  Duration _totalChargingTime = Duration.zero;
+  Duration _totalDischargingTime = Duration.zero;
+
+
+  int _designCapacityMah = 4000;
+  bool _capacityReceivedFromDevice = false;
+  double _smoothedCapacityMah = 4000;
+  int _cycleCount = 0;
+  double _throughputMahForCycle = 0;
+
+  double _chargedSinceStartMah = 0;
+  double _dischargedSinceStartMah = 0;
+
+  bool? _sessionCharging;
+  int? _sessionStartLevel;
+  double _sessionChargedMah = 0;
+  double _sessionDischargedMah = 0;
 
   RealBatteryService() {
     _initializeData();
   }
 
-  void _initializeData() {
-    // Emit initial logs
-    _addLog('🚀 Battery Analyzer Pro initialized');
-    _addLog('📱 Waiting for battery data...');
-    
-    // Emit placeholder initial battery data
-    final now = DateTime.now();
-    final initialData = BatteryData(
-      level: 0,
-      temperature: 0,
-      voltage: 0,
-      health: 'Loading...',
-      technology: 'Unknown',
-      capacity: 0,
-      current: 0,
-      isCharging: false,
-      chargingRate: 0,
-      dischargingRate: 0,
-      cycleCount: 0,
-      estimatedCapacity: 0,
-      timestamp: now,
-      chargingTime: Duration.zero,
-      dischargingTime: Duration.zero,
-    );
-    
-    _batteryDataController.add(initialData);
-    _historyController.add([]);
+  Future<bool> isBackgroundServiceRunning() async {
+    try {
+      return await _platform.invokeMethod<bool>('isBackgroundServiceRunning') ??
+          false;
+    } catch (_) {
+      return false;
+    }
   }
 
-  // Store real battery data
-  int _lastLevel = 0;
-  bool _lastIsCharging = false;
-  DateTime? _lastChargingStart;
-  DateTime? _lastDischargingStart;
-  Duration _totalChargingTime = Duration.zero;
-  Duration _totalDischargingTime = Duration.zero;
-  int _cycleCount = 0;
-  double _accumulatedCharge = 0;
-  int _designCapacity = 4000; // Default, will be updated from device
-  bool _capacityReceivedFromDevice = false; // Track if we got real capacity
+  void _initializeData() {
+    _addLog('Battery Analyzer initialized');
+    _addLog('Collecting samples for capacity calibration');
 
-  void _addLog(String message) {
-    final timestamp = DateTime.now();
-    final formattedTime = '${timestamp.hour.toString().padLeft(2, '0')}:'
-        '${timestamp.minute.toString().padLeft(2, '0')}:'
-        '${timestamp.second.toString().padLeft(2, '0')}';
-
-    _logs.insert(0, '$formattedTime: $message');
-    if (_logs.length > 10) {
-      _logs.removeLast();
-    }
-    _logController.add(List.from(_logs));
+    final BatteryData initialData = BatteryData.empty();
+    _batteryDataController.add(initialData);
+    _historyController.add(const <BatteryHistory>[]);
+    _logController.add(List<String>.from(_logs));
   }
 
   Future<void> startMonitoring() async {
+    if (_monitoringTimer != null) {
+      _addLog('Monitoring already active');
+      return;
+    }
+
     try {
-      _addLog('✅ Starting real battery monitoring...');
+      _addLog('Starting battery monitoring');
 
-      // Request battery permissions on Android
-      // Note: BatteryManager API doesn't require special permissions
-      final bool hasPermission =
-          await platform.invokeMethod('requestPermissions');
-
-      if (!hasPermission) {
-        _addLog('⚠️ Permission check returned false, continuing anyway...');
+      final bool permissionGranted =
+          await _platform.invokeMethod<bool>('requestPermissions') ?? false;
+      if (!permissionGranted) {
+        _addLog('Notification permission not granted yet');
       }
 
-      _addLog('✅ Accessing real battery data via Android BatteryManager API');
-
-      // Start background service for persistent monitoring
       try {
-        await platform.invokeMethod('startBackgroundService');
-        _addLog('🔔 Background notification service started');
-      } catch (e) {
-        _addLog('⚠️ Could not start background service: $e');
+        await _platform.invokeMethod<void>('startBackgroundService');
+        _addLog('Background service started');
+      } catch (error) {
+        _addLog('Background service start failed: $error');
       }
 
-      // Start listening to battery events
       _listenToBatteryEvents();
-
-      // Also poll regularly for updates
-      _monitoringTimer = Timer.periodic(_updateInterval, (_) async {
-        await _fetchBatteryData();
+      _monitoringTimer = Timer.periodic(_updateInterval, (_) {
+        _fetchBatteryData();
       });
-
-      // Get initial data
       await _fetchBatteryData();
-    } on PlatformException catch (e) {
-      _addLog('❌ Platform error: ${e.message}');
-    } catch (e) {
-      _addLog('❌ Error: $e');
+    } on PlatformException catch (error) {
+      _addLog('Platform error while starting monitoring: ${error.message}');
+    } catch (error) {
+      _addLog('Error while starting monitoring: $error');
     }
   }
 
   Future<void> stopMonitoring() async {
-    try {
-      _monitoringTimer?.cancel();
-      _addLog('⏹️ Stopped monitoring');
+    _monitoringTimer?.cancel();
+    _monitoringTimer = null;
+    await _eventSubscription?.cancel();
+    _eventSubscription = null;
 
-      // Stop background service
-      try {
-        await platform.invokeMethod('stopBackgroundService');
-        _addLog('🔔 Background notification service stopped');
-      } catch (e) {
-        _addLog('⚠️ Could not stop background service: $e');
-      }
-    } on PlatformException catch (e) {
-      _addLog('❌ Platform error: ${e.message}');
-    } catch (e) {
-      _addLog('❌ Error: $e');
+    try {
+      await _platform.invokeMethod<void>('stopBackgroundService');
+      _addLog('Background service stopped');
+    } catch (error) {
+      _addLog('Background service stop failed: $error');
     }
+
+    _addLog('Monitoring stopped');
   }
 
   void _listenToBatteryEvents() {
-    // Listen to native battery events
-    eventChannel.receiveBroadcastStream().listen((dynamic event) {
-      if (event is Map) {
-        _processBatteryData(
-            Map<String, dynamic>.from(event));
-      }
-    }, onError: (error) {
-      _addLog('❌ Event channel error: $error');
-    });
+    _eventSubscription?.cancel();
+    _eventSubscription = _eventChannel.receiveBroadcastStream().listen(
+      (dynamic event) {
+        if (event is Map) {
+          _processBatteryData(Map<String, dynamic>.from(event));
+        }
+      },
+      onError: (Object error) {
+        _addLog('Battery event stream error: $error');
+      },
+    );
   }
 
   Future<void> _fetchBatteryData() async {
     try {
-      final dynamic result = await platform.invokeMethod('getBatteryInfo');
+      final dynamic result = await _platform.invokeMethod<dynamic>(
+        'getBatteryInfo',
+      );
 
       if (result is Map) {
         _processBatteryData(Map<String, dynamic>.from(result));
-      } else if (result == null) {
-        _addLog('⚠️ Received null battery data from native code');
-      } else {
-        _addLog('⚠️ Invalid battery data format: ${result.runtimeType}');
       }
-    } on PlatformException catch (e) {
-      _addLog('❌ Platform error: ${e.code} - ${e.message}');
-    } catch (e) {
-      _addLog('❌ Error fetching battery data: $e');
+    } on PlatformException catch (error) {
+      _addLog('Platform error while fetching battery info: ${error.message}');
+    } catch (error) {
+      _addLog('Error while fetching battery info: $error');
     }
   }
 
   void _processBatteryData(Map<String, dynamic> data) {
-    final now = DateTime.now();
+    final DateTime now = DateTime.now();
 
-    // Extract data from Android BatteryManager
-    int level = data['level'] ?? 0;
-    int scale = data['scale'] ?? 100;
-    bool isPlugged = data['isPlugged'] ?? false;
-    int status = data['status'] ?? 0;
-    double temperature = (data['temperature'] ?? 250) / 10.0;
-    double voltage = (data['voltage'] ?? 3800) / 1000.0;
-    int health = data['health'] ?? 1;
-    String technology = data['technology'] ?? 'Unknown';
-    int currentMicroA = data['current'] ?? 0;
-    int current = currentMicroA ~/ 1000; // Convert μA to mA
+    final int levelRaw = _toInt(data['level'], fallback: 0);
+    final int scale = _toInt(data['scale'], fallback: 100);
+    final bool isPlugged = data['isPlugged'] == true;
+    final int status = _toInt(data['status'], fallback: 0);
+    final int healthStatus = _toInt(data['health'], fallback: 1);
+    final double temperatureC =
+        _toDouble(data['temperature'], fallback: 250) / 10.0;
+    final double voltageV = _toDouble(data['voltage'], fallback: 3800) / 1000.0;
+    final String technology = (data['technology'] as String?)?.trim().isNotEmpty ==
+            true
+        ? (data['technology'] as String).trim()
+        : 'Unknown';
 
-    // Get actual design capacity from device
-    if (data['designCapacity'] != null && !_capacityReceivedFromDevice) {
-      int deviceCapacity = (data['designCapacity'] as num).toInt();
-      if (deviceCapacity > 1000 && deviceCapacity < 30000) {
-        _designCapacity = deviceCapacity;
-        _capacityReceivedFromDevice = true;
-        _addLog('✅ Device capacity detected: ${_designCapacity}mAh');
-      }
-    } else if (data['fullChargeCapacity'] != null && !_capacityReceivedFromDevice) {
-      int deviceCapacity = (data['fullChargeCapacity'] as num).toInt();
-      if (deviceCapacity > 1000 && deviceCapacity < 30000) {
-        _designCapacity = deviceCapacity;
-        _capacityReceivedFromDevice = true;
-        _addLog('✅ Full charge capacity detected: ${_designCapacity}mAh');
-      }
-    }
+    final int currentMicroA = _toInt(data['current'], fallback: 0);
+    final int currentMa = currentMicroA ~/ 1000;
 
-    // Calculate battery percentage
-    int batteryPercent = (scale > 0) ? (level * 100 ~/ scale) : 0;
+    _tryUpdateDesignCapacity(data);
 
-    // Determine charging status
-    bool isCharging = isPlugged ||
-        status == 2 || // BatteryManager.BATTERY_STATUS_CHARGING
-        status == 5; // BatteryManager.BATTERY_STATUS_FULL
+    final int levelPercent = scale > 0
+        ? ((levelRaw * 100) / scale).round().clamp(0, 100)
+        : 0;
 
-    // Track charging/discharging time
-    _trackChargingTime(isCharging, now);
+    final bool isCharging = isPlugged ||
+        status == 2 ||
+        status == 5;
 
-    // Calculate charging/discharging rates
-    // Note: current is negative when discharging, positive when charging
-    double chargingRate = isCharging && current > 0 ? current * 3.6 : 0;
-    double dischargingRate =
-        !isCharging && current < 0 ? current.abs() * 3.6 : 0;
+    _updatePhaseDurations(now, isCharging);
 
-    // Track charge cycles
-    _trackChargeCycles(batteryPercent, isCharging, current);
+    final double elapsedSeconds = _resolveElapsedSeconds(now);
+    final double deltaMah = (currentMa * elapsedSeconds) / 3600.0;
+    _integrateCharge(deltaMah, isCharging, levelPercent);
+    _updateCycleCount(deltaMah.abs());
 
-    // Estimate capacity and health
-    double estimatedCapacity = _estimateCapacity(data);
-    double healthPercentage = _calculateHealthPercentage(health, voltage, temperature);
-    double actualCapacity = _designCapacity * (healthPercentage / 100.0);
+    final double measuredCapacityMah =
+        _smoothedCapacityMah <= 0 ? _designCapacityMah.toDouble() : _smoothedCapacityMah;
 
-    // Get health string
-    String healthString = _getHealthString(health);
+    final double chargingRate = currentMa > 0 ? currentMa.toDouble() : 0;
+    final double dischargingRate = currentMa < 0 ? currentMa.abs().toDouble() : 0;
+    final double powerMw = currentMa.abs() * voltageV;
+    final double stressScore = _calculateStressScore(
+      temperatureC,
+      voltageV,
+      currentMa,
+      measuredCapacityMah,
+    );
+    final double healthPercentage = _calculateHealthPercentage(
+      healthStatus,
+      measuredCapacityMah,
+      stressScore,
+    );
+    final String health = _getHealthString(healthStatus, healthPercentage);
 
-    // Create battery data
-    final batteryData = BatteryData(
-      level: batteryPercent,
-      temperature: temperature,
-      voltage: voltage,
-      health: healthString,
+    final Duration chargingTime = _currentChargingDuration(now, isCharging);
+    final Duration dischargingTime = _currentDischargingDuration(now, isCharging);
+
+    final double remainingMah = measuredCapacityMah * (levelPercent / 100.0);
+    final double missingMah = measuredCapacityMah - remainingMah;
+
+    final double projectedTimeToFullHours =
+        chargingRate > 0 ? missingMah / chargingRate : 0;
+    final double projectedTimeToEmptyHours =
+        dischargingRate > 0 ? remainingMah / dischargingRate : 0;
+
+    final BatteryData batteryData = BatteryData(
+      level: levelPercent,
+      temperature: temperatureC,
+      voltage: voltageV,
+      health: health,
       technology: technology,
-      capacity: estimatedCapacity.round(),
-      current: current,
+      capacity: remainingMah.round().clamp(0, 1000000),
+      current: currentMa,
       isCharging: isCharging,
       chargingRate: chargingRate,
       dischargingRate: dischargingRate,
       cycleCount: _cycleCount,
-      estimatedCapacity: estimatedCapacity,
+      estimatedCapacity: measuredCapacityMah,
       timestamp: now,
-      chargingTime: _totalChargingTime,
-      dischargingTime: _totalDischargingTime,
+      chargingTime: chargingTime,
+      dischargingTime: dischargingTime,
       healthPercentage: healthPercentage,
-      actualCapacity: actualCapacity,
+      actualCapacity: measuredCapacityMah,
+      designCapacity: _designCapacityMah,
+      chargedSinceStart: _chargedSinceStartMah,
+      dischargedSinceStart: _dischargedSinceStartMah,
+      netMahSinceStart: _chargedSinceStartMah - _dischargedSinceStartMah,
+      averagePowerMw: powerMw,
+      stressScore: stressScore,
+      projectedTimeToFullHours: projectedTimeToFullHours,
+      projectedTimeToEmptyHours: projectedTimeToEmptyHours,
     );
 
-    // Emit data
     _batteryDataController.add(batteryData);
-
-    // Add to history
     _addToHistory(batteryData);
 
-    // Store for next update
-    _lastLevel = batteryPercent;
-    _lastIsCharging = isCharging;
+    _lastSampleTime = now;
   }
 
-  void _trackChargingTime(bool isCharging, DateTime now) {
-    if (isCharging) {
-      if (_lastChargingStart == null) {
-        _lastChargingStart = now;
-        _addLog('⚡ Real charging detected');
+  void _tryUpdateDesignCapacity(Map<String, dynamic> data) {
+    final int? fromDesign = _parseCapacityField(data['designCapacity']);
+    final int? fromFull = _parseCapacityField(data['fullChargeCapacity']);
+    final int? fromCounter = _parseChargeCounter(data['chargeCounter']);
+
+    final int? candidate = fromDesign ?? fromFull ?? fromCounter;
+    if (candidate != null && candidate >= 1000 && candidate <= 30000) {
+      if (!_capacityReceivedFromDevice || candidate != _designCapacityMah) {
+        _designCapacityMah = candidate;
+        _capacityReceivedFromDevice = true;
+        if (_capacitySamples.isEmpty) {
+          _smoothedCapacityMah = candidate.toDouble();
+        }
+        _addLog('Detected design capacity: $_designCapacityMah mAh');
       }
-      if (_lastDischargingStart != null) {
-        _totalDischargingTime += now.difference(_lastDischargingStart!);
-        _lastDischargingStart = null;
+    }
+  }
+
+  int? _parseCapacityField(dynamic rawValue) {
+    final int parsed = _toInt(rawValue, fallback: 0);
+    if (parsed <= 0) {
+      return null;
+    }
+
+    if (parsed > 1000 && parsed < 30000) {
+      return parsed;
+    }
+    return null;
+  }
+
+  int? _parseChargeCounter(dynamic rawValue) {
+    final int parsed = _toInt(rawValue, fallback: 0);
+    if (parsed <= 0) {
+      return null;
+    }
+
+    if (parsed > 1000000) {
+      final int asMah = parsed ~/ 1000;
+      if (asMah > 1000 && asMah < 30000) {
+        return asMah;
       }
+    }
+    return null;
+  }
+
+  void _updatePhaseDurations(DateTime now, bool isCharging) {
+    if (_phaseStartTime == null || _activePhaseCharging == null) {
+      _phaseStartTime = now;
+      _activePhaseCharging = isCharging;
+      return;
+    }
+
+    if (_activePhaseCharging == isCharging) {
+      return;
+    }
+
+    final Duration phaseDuration = now.difference(_phaseStartTime!);
+    if (_activePhaseCharging!) {
+      _totalChargingTime += phaseDuration;
+      _addLog('Charging phase ended after ${_formatDuration(phaseDuration)}');
     } else {
-      if (_lastDischargingStart == null) {
-        _lastDischargingStart = now;
-        _addLog('🔋 Real discharging detected');
+      _totalDischargingTime += phaseDuration;
+      _addLog('Discharging phase ended after ${_formatDuration(phaseDuration)}');
+    }
+
+    _phaseStartTime = now;
+    _activePhaseCharging = isCharging;
+  }
+
+  Duration _currentChargingDuration(DateTime now, bool isCharging) {
+    if (_phaseStartTime == null || !isCharging) {
+      return _totalChargingTime;
+    }
+
+    return _totalChargingTime + now.difference(_phaseStartTime!);
+  }
+
+  Duration _currentDischargingDuration(DateTime now, bool isCharging) {
+    if (_phaseStartTime == null || isCharging) {
+      return _totalDischargingTime;
+    }
+
+    return _totalDischargingTime + now.difference(_phaseStartTime!);
+  }
+
+  double _resolveElapsedSeconds(DateTime now) {
+    if (_lastSampleTime == null) {
+      return _updateInterval.inSeconds.toDouble();
+    }
+
+    final int elapsedMs = now.difference(_lastSampleTime!).inMilliseconds;
+    if (elapsedMs <= 0) {
+      return 1;
+    }
+    return max(1.0, elapsedMs / 1000.0);
+  }
+
+  void _integrateCharge(double deltaMah, bool isCharging, int levelPercent) {
+    if (deltaMah > 0) {
+      _chargedSinceStartMah += deltaMah;
+      if (_sessionCharging == true) {
+        _sessionChargedMah += deltaMah;
       }
-      if (_lastChargingStart != null) {
-        _totalChargingTime += now.difference(_lastChargingStart!);
-        _lastChargingStart = null;
+    } else if (deltaMah < 0) {
+      final double discharge = deltaMah.abs();
+      _dischargedSinceStartMah += discharge;
+      if (_sessionCharging == false) {
+        _sessionDischargedMah += discharge;
       }
+    }
+
+    if (_sessionCharging == null || _sessionStartLevel == null) {
+      _sessionCharging = isCharging;
+      _sessionStartLevel = levelPercent;
+      return;
+    }
+
+    if (_sessionCharging != isCharging) {
+      _commitSessionEstimate(levelPercent);
+      _sessionCharging = isCharging;
+      _sessionStartLevel = levelPercent;
+      _sessionChargedMah = 0;
+      _sessionDischargedMah = 0;
+      return;
+    }
+
+    _commitSessionEstimate(levelPercent);
+  }
+
+  void _commitSessionEstimate(int currentLevel) {
+    if (_sessionStartLevel == null || _sessionCharging == null) {
+      return;
+    }
+
+    final int deltaPercent = (currentLevel - _sessionStartLevel!).abs();
+    if (deltaPercent < 3) {
+      return;
+    }
+
+    final double throughputMah =
+        _sessionCharging! ? _sessionChargedMah : _sessionDischargedMah;
+    if (throughputMah < 20) {
+      return;
+    }
+
+    final double estimate = throughputMah * 100.0 / deltaPercent;
+    _pushCapacitySample(estimate);
+
+    _sessionStartLevel = currentLevel;
+    _sessionChargedMah = 0;
+    _sessionDischargedMah = 0;
+  }
+
+  void _pushCapacitySample(double estimateMah) {
+    final double minEstimate = max(700, _designCapacityMah * 0.45);
+    final double maxEstimate = _designCapacityMah * 1.6;
+
+    if (estimateMah < minEstimate || estimateMah > maxEstimate) {
+      return;
+    }
+
+    _capacitySamples.add(estimateMah);
+    if (_capacitySamples.length > _maxCapacitySamples) {
+      _capacitySamples.removeAt(0);
+    }
+
+    double weightedSum = 0;
+    double totalWeight = 0;
+    for (int index = 0; index < _capacitySamples.length; index++) {
+      final double weight = index + 1;
+      weightedSum += _capacitySamples[index] * weight;
+      totalWeight += weight;
+    }
+
+    _smoothedCapacityMah =
+        totalWeight == 0 ? _designCapacityMah.toDouble() : weightedSum / totalWeight;
+  }
+
+  void _updateCycleCount(double throughputMah) {
+    if (throughputMah <= 0) {
+      return;
+    }
+
+    _throughputMahForCycle += throughputMah;
+    while (_throughputMahForCycle >= _designCapacityMah) {
+      _cycleCount += 1;
+      _throughputMahForCycle -= _designCapacityMah;
+      _addLog('Cycle count increased to $_cycleCount');
     }
   }
 
-  void _trackChargeCycles(int level, bool isCharging, int current) {
-    if (isCharging && current > 0) {
-      // Accumulate charge during charging
-      double chargeIncrement =
-          (current / 1000.0) * (_updateInterval.inSeconds / 3600.0);
-      _accumulatedCharge += chargeIncrement;
+  double _calculateStressScore(
+    double temperatureC,
+    double voltageV,
+    int currentMa,
+    double measuredCapacityMah,
+  ) {
+    double score = 0;
 
-      // Check if we completed a charge cycle (80% of capacity)
-      if (_accumulatedCharge >= _designCapacity * 0.8) {
-        _cycleCount++;
-        _accumulatedCharge = 0;
-        _addLog('🔄 Real charge cycle detected: $_cycleCount');
+    if (temperatureC > 38) {
+      score += (temperatureC - 38) * 4;
+    } else if (temperatureC < 5) {
+      score += (5 - temperatureC) * 2;
+    }
+
+    if (voltageV > 4.25 || voltageV < 3.3) {
+      score += 10;
+    }
+
+    if (measuredCapacityMah > 0) {
+      final double cRate = currentMa.abs() / measuredCapacityMah;
+      if (cRate > 0.8) {
+        score += (cRate - 0.8) * 35;
       }
     }
-    // Removed duplicate cycle detection based on level changes
+
+    return score.clamp(0, 100).toDouble();
   }
 
-  double _estimateCapacity(Map<String, dynamic> data) {
-    try {
-      // Try to get capacity property first (percentage of design capacity - available on API 21+)
-      int capacity = data['capacity'] ?? 0;
-      if (capacity > 0 && capacity <= 100) {
-        // Capacity is percentage of design capacity
-        double estimatedCap = _designCapacity * capacity / 100.0;
-        _addLog('📊 Capacity from API: ${estimatedCap.toInt()}mAh (${capacity}%)');
-        return estimatedCap;
-      }
+  double _calculateHealthPercentage(
+    int healthStatus,
+    double measuredCapacityMah,
+    double stressScore,
+  ) {
+    final double capacityHealth =
+        (measuredCapacityMah / _designCapacityMah) * 100.0;
 
-      // Try to get charge counter (available on API level 21+)
-      int chargeCounter = data['chargeCounter'] ?? 0;
-      if (chargeCounter > 0) {
-        // Charge counter is in nAh, convert to mAh
-        double estimatedCap = chargeCounter / 1000000.0;
-        _addLog('📊 Capacity from charge counter: ${estimatedCap.toInt()}mAh');
-        return estimatedCap;
-      }
+    final double statusPenalty = switch (healthStatus) {
+      2 => 0, // good
+      3 => 18, // overheat
+      4 => 45, // dead
+      5 => 20, // over voltage
+      6 => 28, // unspecified failure
+      7 => 12, // cold
+      _ => 8,
+    };
 
-      // Fallback: estimate based on voltage and current
-      double voltage = (data['voltage'] ?? 3800) / 1000.0;
-      int currentMicroA = data['current'] ?? 0;
-      int current = currentMicroA ~/ 1000; // Convert to mA
-
-      // Estimate based on voltage curve for Li-ion
-      double estimatedCap;
-      if (voltage > 4.15) {
-        estimatedCap = _designCapacity * 0.98;
-      } else if (voltage > 4.0) {
-        estimatedCap = _designCapacity * 0.90;
-      } else if (voltage > 3.8) {
-        estimatedCap = _designCapacity * 0.70;
-      } else if (voltage > 3.6) {
-        estimatedCap = _designCapacity * 0.40;
-      } else if (voltage > 3.2) {
-        estimatedCap = _designCapacity * 0.10;
-      } else {
-        estimatedCap = _designCapacity * 0.05;
-      }
-      
-      _addLog('📊 Capacity estimated from voltage: ${estimatedCap.toInt()}mAh');
-      return estimatedCap;
-    } catch (e) {
-      _addLog('⚠️ Error estimating capacity: $e');
-      return _designCapacity.toDouble();
-    }
+    final double stressPenalty = stressScore * 0.22;
+    final double health = capacityHealth - statusPenalty - stressPenalty;
+    return health.clamp(0, 100).toDouble();
   }
 
-  String _getHealthString(int health) {
-    switch (health) {
-      case 2:
-        return 'Good';
-      case 3:
-        return 'Overheat';
-      case 4:
-        return 'Dead';
-      case 5:
-        return 'Over Voltage';
-      case 6:
-        return 'Unspecified Failure';
-      case 7:
-        return 'Cold';
-      default:
-        return 'Unknown';
+  String _getHealthString(int status, double healthPercentage) {
+    if (status == 3) {
+      return 'Overheat';
     }
-  }
+    if (status == 4) {
+      return 'Dead';
+    }
+    if (status == 5) {
+      return 'Over voltage';
+    }
+    if (status == 6) {
+      return 'Failure';
+    }
+    if (status == 7) {
+      return 'Cold';
+    }
 
-  double _calculateHealthPercentage(int health, double voltage, double temperature) {
-    double healthScore = 100.0;
-    
-    // Health based on battery status constant
-    switch (health) {
-      case 2: // BATTERY_HEALTH_GOOD
-        healthScore = 95.0;
-        break;
-      case 3: // BATTERY_HEALTH_OVERHEAT
-        healthScore = 60.0;
-        break;
-      case 4: // BATTERY_HEALTH_DEAD
-        healthScore = 10.0;
-        break;
-      case 5: // BATTERY_HEALTH_OVER_VOLTAGE
-        healthScore = 50.0;
-        break;
-      case 6: // BATTERY_HEALTH_UNSPECIFIED_FAILURE
-        healthScore = 30.0;
-        break;
-      case 7: // BATTERY_HEALTH_COLD
-        healthScore = 70.0;
-        break;
-      default:
-        healthScore = 85.0; // Unknown status
+    if (healthPercentage >= 90) {
+      return 'Excellent';
     }
-    
-    // Adjust health based on voltage (Li-ion batteries degrade when over/under charged)
-    if (voltage > 4.25) {
-      healthScore -= 5; // Over-voltage reduces health
-    } else if (voltage < 2.5) {
-      healthScore -= 10; // Deep discharge reduces health significantly
+    if (healthPercentage >= 80) {
+      return 'Good';
     }
-    
-    // Adjust health based on temperature
-    if (temperature > 45) {
-      healthScore -= (temperature - 45) * 2; // High temp reduces health
-    } else if (temperature < 0) {
-      healthScore -= (0 - temperature) * 1.5; // Low temp slightly reduces health
+    if (healthPercentage >= 70) {
+      return 'Fair';
     }
-    
-    // Ensure health is between 0 and 100
-    return healthScore.clamp(0.0, 100.0);
+    if (healthPercentage >= 55) {
+      return 'Aging';
+    }
+    return 'Weak';
   }
 
   void _addToHistory(BatteryData data) {
-    final historyEntry = BatteryHistory(
+    final BatteryHistory entry = BatteryHistory(
       current: data.current,
       level: data.level,
       isCharging: data.isCharging,
       timestamp: data.timestamp,
     );
 
-    _history.add(historyEntry);
+    _history.add(entry);
     if (_history.length > _maxHistory) {
       _history.removeAt(0);
     }
-    _historyController.add(List.from(_history));
+    _historyController.add(List<BatteryHistory>.from(_history));
   }
 
-  void _provideFallbackData() {
-    // Provide simulated data if real data fails
-    final now = DateTime.now();
-    final fallbackData = BatteryData(
-      level: 85,
-      temperature: 25.0,
-      voltage: 3.8,
-      health: 'Good',
-      technology: 'Li-ion',
-      capacity: 4000,
-      current: -350,
-      isCharging: false,
-      chargingRate: 0,
-      dischargingRate: 1260, // 350mA * 3.6
-      cycleCount: _cycleCount,
-      estimatedCapacity: 4000.0,
-      timestamp: now,
-      chargingTime: _totalChargingTime,
-      dischargingTime: _totalDischargingTime,
-    );
+  void _addLog(String message) {
+    final DateTime now = DateTime.now();
+    final String timestamp = '${now.hour.toString().padLeft(2, '0')}:'
+        '${now.minute.toString().padLeft(2, '0')}:'
+        '${now.second.toString().padLeft(2, '0')}';
 
-    _batteryDataController.add(fallbackData);
-    _addToHistory(fallbackData);
-    _addLog('⚠️ Using simulated data (real data unavailable)');
+    _logs.insert(0, '$timestamp  $message');
+    if (_logs.length > _maxLogs) {
+      _logs.removeLast();
+    }
+    _logController.add(List<String>.from(_logs));
+  }
+
+  int _toInt(dynamic value, {required int fallback}) {
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.toInt();
+    }
+    if (value is String) {
+      return int.tryParse(value) ?? fallback;
+    }
+    return fallback;
+  }
+
+  double _toDouble(dynamic value, {required double fallback}) {
+    if (value is double) {
+      return value;
+    }
+    if (value is num) {
+      return value.toDouble();
+    }
+    if (value is String) {
+      return double.tryParse(value) ?? fallback;
+    }
+    return fallback;
+  }
+
+  String _formatDuration(Duration duration) {
+    final int hours = duration.inHours;
+    final int minutes = duration.inMinutes.remainder(60);
+    final int seconds = duration.inSeconds.remainder(60);
+
+    if (hours > 0) {
+      return '${hours}h ${minutes}m';
+    }
+    if (minutes > 0) {
+      return '${minutes}m ${seconds}s';
+    }
+    return '${seconds}s';
   }
 
   void clearData() {
     _history.clear();
+    _historyController.add(const <BatteryHistory>[]);
+
     _logs.clear();
-    _cycleCount = 0;
-    _accumulatedCharge = 0;
+    _addLog('History and counters cleared');
+
+    _lastSampleTime = null;
+    _phaseStartTime = null;
+    _activePhaseCharging = null;
     _totalChargingTime = Duration.zero;
     _totalDischargingTime = Duration.zero;
-    _lastChargingStart = null;
-    _lastDischargingStart = null;
 
-    _addLog('🔄 Real data cleared');
-    _historyController.add([]);
-    _logController.add([]);
-  }
 
-  String _formatDuration(Duration duration) {
-    if (duration.inHours > 0) {
-      return '${duration.inHours}h ${duration.inMinutes.remainder(60)}m';
-    } else if (duration.inMinutes > 0) {
-      return '${duration.inMinutes}m ${duration.inSeconds.remainder(60)}s';
-    }
-    return '${duration.inSeconds}s';
+    _smoothedCapacityMah = _designCapacityMah.toDouble();
+    _capacitySamples.clear();
+    _cycleCount = 0;
+    _throughputMahForCycle = 0;
+    _chargedSinceStartMah = 0;
+    _dischargedSinceStartMah = 0;
+
+    _sessionCharging = null;
+    _sessionStartLevel = null;
+    _sessionChargedMah = 0;
+    _sessionDischargedMah = 0;
   }
 
   void dispose() {
     _monitoringTimer?.cancel();
+    _eventSubscription?.cancel();
     _batteryDataController.close();
     _historyController.close();
     _logController.close();

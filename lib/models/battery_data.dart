@@ -14,10 +14,18 @@ class BatteryData {
   final DateTime timestamp;
   final Duration chargingTime;
   final Duration dischargingTime;
-  final double healthPercentage; // Health as percentage (0-100)
-  final double actualCapacity; // Actual usable capacity in mAh
+  final double healthPercentage;
+  final double actualCapacity;
+  final int designCapacity;
+  final double chargedSinceStart;
+  final double dischargedSinceStart;
+  final double netMahSinceStart;
+  final double averagePowerMw;
+  final double stressScore;
+  final double projectedTimeToFullHours;
+  final double projectedTimeToEmptyHours;
 
-  BatteryData({
+  const BatteryData({
     required this.level,
     required this.temperature,
     required this.voltage,
@@ -35,13 +43,21 @@ class BatteryData {
     required this.dischargingTime,
     this.healthPercentage = 100.0,
     this.actualCapacity = 4000.0,
+    this.designCapacity = 4000,
+    this.chargedSinceStart = 0,
+    this.dischargedSinceStart = 0,
+    this.netMahSinceStart = 0,
+    this.averagePowerMw = 0,
+    this.stressScore = 0,
+    this.projectedTimeToFullHours = 0,
+    this.projectedTimeToEmptyHours = 0,
   });
 
   factory BatteryData.empty() {
     return BatteryData(
       level: 0,
-      temperature: 0.0,
-      voltage: 0.0,
+      temperature: 0,
+      voltage: 0,
       health: 'Unknown',
       technology: 'Unknown',
       capacity: 0,
@@ -50,8 +66,9 @@ class BatteryData {
       timestamp: DateTime.now(),
       chargingTime: Duration.zero,
       dischargingTime: Duration.zero,
-      healthPercentage: 0.0,
-      actualCapacity: 0.0,
+      healthPercentage: 0,
+      actualCapacity: 0,
+      designCapacity: 0,
     );
   }
 
@@ -73,6 +90,14 @@ class BatteryData {
     Duration? dischargingTime,
     double? healthPercentage,
     double? actualCapacity,
+    int? designCapacity,
+    double? chargedSinceStart,
+    double? dischargedSinceStart,
+    double? netMahSinceStart,
+    double? averagePowerMw,
+    double? stressScore,
+    double? projectedTimeToFullHours,
+    double? projectedTimeToEmptyHours,
   }) {
     return BatteryData(
       level: level ?? this.level,
@@ -92,6 +117,16 @@ class BatteryData {
       dischargingTime: dischargingTime ?? this.dischargingTime,
       healthPercentage: healthPercentage ?? this.healthPercentage,
       actualCapacity: actualCapacity ?? this.actualCapacity,
+      designCapacity: designCapacity ?? this.designCapacity,
+      chargedSinceStart: chargedSinceStart ?? this.chargedSinceStart,
+      dischargedSinceStart: dischargedSinceStart ?? this.dischargedSinceStart,
+      netMahSinceStart: netMahSinceStart ?? this.netMahSinceStart,
+      averagePowerMw: averagePowerMw ?? this.averagePowerMw,
+      stressScore: stressScore ?? this.stressScore,
+      projectedTimeToFullHours:
+          projectedTimeToFullHours ?? this.projectedTimeToFullHours,
+      projectedTimeToEmptyHours:
+          projectedTimeToEmptyHours ?? this.projectedTimeToEmptyHours,
     );
   }
 }
