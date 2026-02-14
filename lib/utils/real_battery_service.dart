@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/battery_data.dart';
 import '../models/battery_history.dart';
@@ -11,6 +12,9 @@ class RealBatteryService {
       MethodChannel('com.example.battery_analyzer/battery');
   static const EventChannel _eventChannel =
       EventChannel('com.example.battery_analyzer/battery_events');
+
+  static const String _manualCapacityKey = 'manual_design_capacity_mah';
+  static const String _capacitySamplesKey = 'capacity_samples_mah_v1';
 
   final StreamController<BatteryData> _batteryDataController =
       StreamController<BatteryData>.broadcast();
@@ -26,7 +30,7 @@ class RealBatteryService {
   final Duration _updateInterval = const Duration(seconds: 1);
   final int _maxHistory = 360;
   final int _maxLogs = 150;
-  final int _maxCapacitySamples = 32;
+  final int _maxCapacitySamples = 40;
 
   final List<BatteryHistory> _history = <BatteryHistory>[];
   final List<String> _logs = <String>[];
@@ -34,6 +38,8 @@ class RealBatteryService {
 
   StreamSubscription<dynamic>? _eventSubscription;
   Timer? _monitoringTimer;
+  Future<void>? _preferencesReady;
+  SharedPreferences? _prefs;
 
   DateTime? _lastSampleTime;
   DateTime? _phaseStartTime;
@@ -42,8 +48,8 @@ class RealBatteryService {
   Duration _totalChargingTime = Duration.zero;
   Duration _totalDischargingTime = Duration.zero;
 
-
-  int _designCapacityMah = 4000;
+  int _detectedDesignCapacityMah = 4000;
+  int? _manualDesignCapacityMah;
   bool _capacityReceivedFromDevice = false;
   double _smoothedCapacityMah = 4000;
   int _cycleCount = 0;
@@ -56,9 +62,88 @@ class RealBatteryService {
   int? _sessionStartLevel;
   double _sessionChargedMah = 0;
   double _sessionDischargedMah = 0;
+  double? _lastChargeCounterMah;
+
+  double _ewmaTemperatureC = 25;
+  double _ewmaVoltageV = 3.85;
+  double _ewmaCurrentMa = 0;
+  double _thermalExposureScore = 0;
+  double _highVoltageExposureScore = 0;
+  double _highCRateExposureScore = 0;
+  double _smoothedHealthPercentage = 90;
+
+  String _manufacturer = 'Unknown';
+  String _brand = 'Unknown';
+  String _model = 'Unknown';
+  String _device = 'Unknown';
+  bool _loggedDeviceInfo = false;
+
+  int get _activeDesignCapacityMah =>
+      _manualDesignCapacityMah ?? _detectedDesignCapacityMah;
 
   RealBatteryService() {
+    _preferencesReady = _loadPreferences();
     _initializeData();
+  }
+
+  Future<void> _loadPreferences() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      _prefs = prefs;
+
+      final int? manual = prefs.getInt(_manualCapacityKey);
+      if (manual != null && manual >= 800 && manual <= 15000) {
+        _manualDesignCapacityMah = manual;
+        _addLog('Manual design capacity loaded: $_manualDesignCapacityMah mAh');
+      }
+
+      final List<String>? rawSamples = prefs.getStringList(_capacitySamplesKey);
+      if (rawSamples != null && rawSamples.isNotEmpty) {
+        _capacitySamples
+          ..clear()
+          ..addAll(
+            rawSamples
+                .map(double.tryParse)
+                .whereType<double>()
+                .where((double value) => value >= 650 && value <= 30000)
+                .take(_maxCapacitySamples),
+          );
+      }
+
+      if (_capacitySamples.isEmpty) {
+        _smoothedCapacityMah = _activeDesignCapacityMah.toDouble();
+      } else {
+        _recomputeSmoothedCapacity();
+        _addLog('Loaded ${_capacitySamples.length} saved capacity samples');
+      }
+    } catch (error) {
+      _addLog('Could not load preferences: $error');
+    }
+  }
+
+  Future<void> setManualDesignCapacity(int? capacityMah) async {
+    await _preferencesReady;
+
+    final SharedPreferences prefs =
+        _prefs ?? await SharedPreferences.getInstance();
+    _prefs = prefs;
+
+    if (capacityMah == null) {
+      await prefs.remove(_manualCapacityKey);
+      _manualDesignCapacityMah = null;
+      _addLog('Manual design capacity cleared. Using auto-detected capacity.');
+    } else {
+      final int sanitized = capacityMah.clamp(800, 15000);
+      await prefs.setInt(_manualCapacityKey, sanitized);
+      _manualDesignCapacityMah = sanitized;
+      _addLog('Manual design capacity set to $sanitized mAh');
+    }
+
+    if (_capacitySamples.isEmpty) {
+      _smoothedCapacityMah = _activeDesignCapacityMah.toDouble();
+    }
+
+    await _fetchBatteryData();
   }
 
   Future<bool> isBackgroundServiceRunning() async {
@@ -72,7 +157,7 @@ class RealBatteryService {
 
   void _initializeData() {
     _addLog('Battery Analyzer initialized');
-    _addLog('Collecting samples for capacity calibration');
+    _addLog('Collecting samples for precision calibration');
 
     final BatteryData initialData = BatteryData.empty();
     _batteryDataController.add(initialData);
@@ -81,6 +166,8 @@ class RealBatteryService {
   }
 
   Future<void> startMonitoring() async {
+    await _preferencesReady;
+
     if (_monitoringTimer != null) {
       _addLog('Monitoring already active');
       return;
@@ -171,52 +258,74 @@ class RealBatteryService {
     final double temperatureC =
         _toDouble(data['temperature'], fallback: 250) / 10.0;
     final double voltageV = _toDouble(data['voltage'], fallback: 3800) / 1000.0;
-    final String technology = (data['technology'] as String?)?.trim().isNotEmpty ==
-            true
-        ? (data['technology'] as String).trim()
-        : 'Unknown';
+    final String technology = _cleanString(data['technology']);
+
+    _manufacturer = _cleanString(data['manufacturer']);
+    _brand = _cleanString(data['brand']);
+    _model = _cleanString(data['model']);
+    _device = _cleanString(data['device']);
+
+    if (!_loggedDeviceInfo && _model != 'Unknown') {
+      _addLog('Device detected: $_manufacturer $_model ($_device)');
+      _loggedDeviceInfo = true;
+    }
 
     final int currentMicroA = _toInt(data['current'], fallback: 0);
     final int currentMa = currentMicroA ~/ 1000;
 
-    _tryUpdateDesignCapacity(data);
+    final int levelPercent =
+        scale > 0 ? ((levelRaw * 100) / scale).round().clamp(0, 100) : 0;
 
-    final int levelPercent = scale > 0
-        ? ((levelRaw * 100) / scale).round().clamp(0, 100)
-        : 0;
+    _tryUpdateDetectedDesignCapacity(data, levelPercent);
+    final int designCapacityMah = _activeDesignCapacityMah;
+    final double? chargeCounterMah = _parseChargeCounterMah(data['chargeCounter']);
 
-    final bool isCharging = isPlugged ||
-        status == 2 ||
-        status == 5;
+    final bool isCharging = isPlugged || status == 2 || status == 5;
 
     _updatePhaseDurations(now, isCharging);
 
     final double elapsedSeconds = _resolveElapsedSeconds(now);
-    final double deltaMah = (currentMa * elapsedSeconds) / 3600.0;
-    _integrateCharge(deltaMah, isCharging, levelPercent);
-    _updateCycleCount(deltaMah.abs());
+    final double currentMagnitudeMah =
+        (currentMa.abs() * elapsedSeconds) / 3600.0;
+    final double throughputMah = _integrateCharge(
+      currentMagnitudeMah,
+      isCharging,
+      levelPercent,
+      chargeCounterMah,
+      elapsedSeconds,
+    );
+    _updateCycleCount(throughputMah, designCapacityMah);
 
-    final double measuredCapacityMah =
-        _smoothedCapacityMah <= 0 ? _designCapacityMah.toDouble() : _smoothedCapacityMah;
+    final double measuredCapacityMah = _smoothedCapacityMah <= 0
+        ? designCapacityMah.toDouble()
+        : _smoothedCapacityMah;
 
-    final double chargingRate = currentMa > 0 ? currentMa.toDouble() : 0;
-    final double dischargingRate = currentMa < 0 ? currentMa.abs().toDouble() : 0;
-    final double powerMw = currentMa.abs() * voltageV;
-    final double stressScore = _calculateStressScore(
+    _updateSignalAverages(temperatureC, voltageV, currentMa, elapsedSeconds);
+    _updateStressExposure(
+      elapsedSeconds,
       temperatureC,
       voltageV,
       currentMa,
       measuredCapacityMah,
     );
+
+    final double chargingRate = currentMa > 0 ? currentMa.toDouble() : 0;
+    final double dischargingRate =
+        currentMa < 0 ? currentMa.abs().toDouble() : 0;
+    final double powerMw = currentMa.abs() * voltageV;
+
+    final double stressScore = _calculateStressScore(measuredCapacityMah);
     final double healthPercentage = _calculateHealthPercentage(
       healthStatus,
       measuredCapacityMah,
+      designCapacityMah,
       stressScore,
     );
     final String health = _getHealthString(healthStatus, healthPercentage);
 
     final Duration chargingTime = _currentChargingDuration(now, isCharging);
-    final Duration dischargingTime = _currentDischargingDuration(now, isCharging);
+    final Duration dischargingTime =
+        _currentDischargingDuration(now, isCharging);
 
     final double remainingMah = measuredCapacityMah * (levelPercent / 100.0);
     final double missingMah = measuredCapacityMah - remainingMah;
@@ -244,7 +353,7 @@ class RealBatteryService {
       dischargingTime: dischargingTime,
       healthPercentage: healthPercentage,
       actualCapacity: measuredCapacityMah,
-      designCapacity: _designCapacityMah,
+      designCapacity: designCapacityMah,
       chargedSinceStart: _chargedSinceStartMah,
       dischargedSinceStart: _dischargedSinceStartMah,
       netMahSinceStart: _chargedSinceStartMah - _dischargedSinceStartMah,
@@ -252,6 +361,12 @@ class RealBatteryService {
       stressScore: stressScore,
       projectedTimeToFullHours: projectedTimeToFullHours,
       projectedTimeToEmptyHours: projectedTimeToEmptyHours,
+      manufacturer: _manufacturer,
+      brand: _brand,
+      model: _model,
+      device: _device,
+      isDesignCapacityManual: _manualDesignCapacityMah != null,
+      manualDesignCapacity: _manualDesignCapacityMah,
     );
 
     _batteryDataController.add(batteryData);
@@ -260,20 +375,38 @@ class RealBatteryService {
     _lastSampleTime = now;
   }
 
-  void _tryUpdateDesignCapacity(Map<String, dynamic> data) {
+  void _tryUpdateDetectedDesignCapacity(
+    Map<String, dynamic> data,
+    int levelPercent,
+  ) {
     final int? fromDesign = _parseCapacityField(data['designCapacity']);
     final int? fromFull = _parseCapacityField(data['fullChargeCapacity']);
     final int? fromCounter = _parseChargeCounter(data['chargeCounter']);
+    final int? fromCounterAndSoc = _estimateFromChargeCounterAndSoc(
+      data['chargeCounter'],
+      levelPercent,
+    );
+    final int? fromEnergyAndSoc = _estimateFromEnergyAndSoc(
+      data['remainingCapacityFromEnergy'],
+      levelPercent,
+    );
 
-    final int? candidate = fromDesign ?? fromFull ?? fromCounter;
+    final int? candidate = fromDesign ??
+        fromFull ??
+        fromCounterAndSoc ??
+        fromCounter ??
+        fromEnergyAndSoc;
+
     if (candidate != null && candidate >= 1000 && candidate <= 30000) {
-      if (!_capacityReceivedFromDevice || candidate != _designCapacityMah) {
-        _designCapacityMah = candidate;
+      if (!_capacityReceivedFromDevice ||
+          candidate != _detectedDesignCapacityMah) {
+        _detectedDesignCapacityMah = candidate;
         _capacityReceivedFromDevice = true;
-        if (_capacitySamples.isEmpty) {
+        if (_capacitySamples.isEmpty && _manualDesignCapacityMah == null) {
           _smoothedCapacityMah = candidate.toDouble();
         }
-        _addLog('Detected design capacity: $_designCapacityMah mAh');
+        _addLog(
+            'Auto design capacity detected: $_detectedDesignCapacityMah mAh');
       }
     }
   }
@@ -283,7 +416,6 @@ class RealBatteryService {
     if (parsed <= 0) {
       return null;
     }
-
     if (parsed > 1000 && parsed < 30000) {
       return parsed;
     }
@@ -295,12 +427,38 @@ class RealBatteryService {
     if (parsed <= 0) {
       return null;
     }
-
-    if (parsed > 1000000) {
+    if (parsed > 30000) {
       final int asMah = parsed ~/ 1000;
       if (asMah > 1000 && asMah < 30000) {
         return asMah;
       }
+    }
+    if (parsed > 1000 && parsed < 30000) {
+      return parsed;
+    }
+    return null;
+  }
+
+  int? _estimateFromChargeCounterAndSoc(dynamic rawChargeCounter, int soc) {
+    final double? remainingMah = _parseChargeCounterMah(rawChargeCounter);
+    if (remainingMah == null || soc <= 0 || soc > 100) {
+      return null;
+    }
+    final double estimate = remainingMah / (soc / 100.0);
+    if (estimate > 800 && estimate < 30000) {
+      return estimate.round();
+    }
+    return null;
+  }
+
+  int? _estimateFromEnergyAndSoc(dynamic rawRemainingFromEnergy, int soc) {
+    final int remainingMah = _toInt(rawRemainingFromEnergy, fallback: 0);
+    if (remainingMah <= 0 || soc <= 0 || soc > 100) {
+      return null;
+    }
+    final double estimate = remainingMah / (soc / 100.0);
+    if (estimate > 800 && estimate < 30000) {
+      return estimate.round();
     }
     return null;
   }
@@ -322,7 +480,8 @@ class RealBatteryService {
       _addLog('Charging phase ended after ${_formatDuration(phaseDuration)}');
     } else {
       _totalDischargingTime += phaseDuration;
-      _addLog('Discharging phase ended after ${_formatDuration(phaseDuration)}');
+      _addLog(
+          'Discharging phase ended after ${_formatDuration(phaseDuration)}');
     }
 
     _phaseStartTime = now;
@@ -333,7 +492,6 @@ class RealBatteryService {
     if (_phaseStartTime == null || !isCharging) {
       return _totalChargingTime;
     }
-
     return _totalChargingTime + now.difference(_phaseStartTime!);
   }
 
@@ -341,7 +499,6 @@ class RealBatteryService {
     if (_phaseStartTime == null || isCharging) {
       return _totalDischargingTime;
     }
-
     return _totalDischargingTime + now.difference(_phaseStartTime!);
   }
 
@@ -349,7 +506,6 @@ class RealBatteryService {
     if (_lastSampleTime == null) {
       return _updateInterval.inSeconds.toDouble();
     }
-
     final int elapsedMs = now.difference(_lastSampleTime!).inMilliseconds;
     if (elapsedMs <= 0) {
       return 1;
@@ -357,14 +513,31 @@ class RealBatteryService {
     return max(1.0, elapsedMs / 1000.0);
   }
 
-  void _integrateCharge(double deltaMah, bool isCharging, int levelPercent) {
-    if (deltaMah > 0) {
-      _chargedSinceStartMah += deltaMah;
+  double _integrateCharge(
+    double currentMagnitudeMah,
+    bool isCharging,
+    int levelPercent,
+    double? chargeCounterMah,
+    double elapsedSeconds,
+  ) {
+    final double? counterDeltaMah =
+        _consumeChargeCounterDelta(chargeCounterMah, elapsedSeconds);
+    final bool counterMatchesDirection = counterDeltaMah != null &&
+        ((isCharging && counterDeltaMah >= 0) ||
+            (!isCharging && counterDeltaMah <= 0));
+
+    final double throughputMah = counterMatchesDirection
+        ? counterDeltaMah.abs()
+        : currentMagnitudeMah;
+    final double signedDeltaMah = isCharging ? throughputMah : -throughputMah;
+
+    if (signedDeltaMah > 0) {
+      _chargedSinceStartMah += signedDeltaMah;
       if (_sessionCharging == true) {
-        _sessionChargedMah += deltaMah;
+        _sessionChargedMah += signedDeltaMah;
       }
-    } else if (deltaMah < 0) {
-      final double discharge = deltaMah.abs();
+    } else if (signedDeltaMah < 0) {
+      final double discharge = signedDeltaMah.abs();
       _dischargedSinceStartMah += discharge;
       if (_sessionCharging == false) {
         _sessionDischargedMah += discharge;
@@ -374,7 +547,7 @@ class RealBatteryService {
     if (_sessionCharging == null || _sessionStartLevel == null) {
       _sessionCharging = isCharging;
       _sessionStartLevel = levelPercent;
-      return;
+      return throughputMah;
     }
 
     if (_sessionCharging != isCharging) {
@@ -383,10 +556,62 @@ class RealBatteryService {
       _sessionStartLevel = levelPercent;
       _sessionChargedMah = 0;
       _sessionDischargedMah = 0;
-      return;
+      return throughputMah;
     }
 
     _commitSessionEstimate(levelPercent);
+    return throughputMah;
+  }
+
+  double? _parseChargeCounterMah(dynamic rawValue) {
+    final int parsed = _toInt(rawValue, fallback: 0);
+    if (parsed <= 0) {
+      return null;
+    }
+    if (parsed > 30000) {
+      final double asMah = parsed / 1000.0;
+      if (asMah > 800 && asMah < 30000) {
+        return asMah;
+      }
+      return null;
+    }
+    if (parsed > 800 && parsed < 30000) {
+      return parsed.toDouble();
+    }
+    return null;
+  }
+
+  double? _consumeChargeCounterDelta(
+    double? chargeCounterMah,
+    double elapsedSeconds,
+  ) {
+    if (chargeCounterMah == null) {
+      return null;
+    }
+
+    if (_lastChargeCounterMah == null) {
+      _lastChargeCounterMah = chargeCounterMah;
+      return null;
+    }
+
+    final double deltaMah = chargeCounterMah - _lastChargeCounterMah!;
+    _lastChargeCounterMah = chargeCounterMah;
+
+    if (!deltaMah.isFinite || deltaMah == 0) {
+      return null;
+    }
+
+    final double normalizedSeconds = elapsedSeconds <= 0 ? 1.0 : elapsedSeconds;
+    final double maxReasonableDelta = max(
+      0.6,
+      (_activeDesignCapacityMah * 6.0) * (normalizedSeconds / 3600.0),
+    );
+
+    if (deltaMah.abs() > maxReasonableDelta) {
+      return null;
+    }
+
+    return deltaMah;
   }
 
   void _commitSessionEstimate(int currentLevel) {
@@ -395,13 +620,13 @@ class RealBatteryService {
     }
 
     final int deltaPercent = (currentLevel - _sessionStartLevel!).abs();
-    if (deltaPercent < 3) {
+    if (deltaPercent < 2) {
       return;
     }
 
     final double throughputMah =
         _sessionCharging! ? _sessionChargedMah : _sessionDischargedMah;
-    if (throughputMah < 20) {
+    if (throughputMah < 15) {
       return;
     }
 
@@ -414,8 +639,9 @@ class RealBatteryService {
   }
 
   void _pushCapacitySample(double estimateMah) {
-    final double minEstimate = max(700, _designCapacityMah * 0.45);
-    final double maxEstimate = _designCapacityMah * 1.6;
+    final int effectiveDesignMah = _activeDesignCapacityMah;
+    final double minEstimate = max(650, effectiveDesignMah * 0.45);
+    final double maxEstimate = effectiveDesignMah * 1.7;
 
     if (estimateMah < minEstimate || estimateMah > maxEstimate) {
       return;
@@ -426,80 +652,148 @@ class RealBatteryService {
       _capacitySamples.removeAt(0);
     }
 
+    _recomputeSmoothedCapacity();
+    _persistCapacitySamples();
+  }
+
+  void _recomputeSmoothedCapacity() {
+    if (_capacitySamples.isEmpty) {
+      _smoothedCapacityMah = _activeDesignCapacityMah.toDouble();
+      return;
+    }
+
     double weightedSum = 0;
     double totalWeight = 0;
     for (int index = 0; index < _capacitySamples.length; index++) {
-      final double weight = index + 1;
+      final double weight = 1 + (index / _capacitySamples.length) * 2;
       weightedSum += _capacitySamples[index] * weight;
       totalWeight += weight;
     }
 
-    _smoothedCapacityMah =
-        totalWeight == 0 ? _designCapacityMah.toDouble() : weightedSum / totalWeight;
+    _smoothedCapacityMah = totalWeight == 0
+        ? _activeDesignCapacityMah.toDouble()
+        : weightedSum / totalWeight;
   }
 
-  void _updateCycleCount(double throughputMah) {
-    if (throughputMah <= 0) {
+  void _persistCapacitySamples() {
+    Future<void>(() async {
+      final SharedPreferences prefs =
+          _prefs ?? await SharedPreferences.getInstance();
+      _prefs = prefs;
+      final List<String> serialized = _capacitySamples
+          .map((double value) => value.toStringAsFixed(2))
+          .toList(growable: false);
+      await prefs.setStringList(_capacitySamplesKey, serialized);
+    }).catchError((_) {});
+  }
+
+  void _updateCycleCount(double throughputMah, int designCapacityMah) {
+    if (throughputMah <= 0 || designCapacityMah <= 0) {
       return;
     }
 
     _throughputMahForCycle += throughputMah;
-    while (_throughputMahForCycle >= _designCapacityMah) {
+    while (_throughputMahForCycle >= designCapacityMah) {
       _cycleCount += 1;
-      _throughputMahForCycle -= _designCapacityMah;
+      _throughputMahForCycle -= designCapacityMah;
       _addLog('Cycle count increased to $_cycleCount');
     }
   }
 
-  double _calculateStressScore(
+  void _updateSignalAverages(
+    double temperatureC,
+    double voltageV,
+    int currentMa,
+    double elapsedSeconds,
+  ) {
+    final double alpha = (elapsedSeconds / 15).clamp(0.05, 0.4);
+    _ewmaTemperatureC += (temperatureC - _ewmaTemperatureC) * alpha;
+    _ewmaVoltageV += (voltageV - _ewmaVoltageV) * alpha;
+    _ewmaCurrentMa += (currentMa.toDouble() - _ewmaCurrentMa) * alpha;
+  }
+
+  void _updateStressExposure(
+    double elapsedSeconds,
     double temperatureC,
     double voltageV,
     int currentMa,
     double measuredCapacityMah,
   ) {
-    double score = 0;
+    final double hours = elapsedSeconds / 3600.0;
+    final double cRate =
+        measuredCapacityMah > 0 ? currentMa.abs() / measuredCapacityMah : 0;
 
-    if (temperatureC > 38) {
-      score += (temperatureC - 38) * 4;
-    } else if (temperatureC < 5) {
-      score += (5 - temperatureC) * 2;
-    }
+    final double thermalInstant = max(0.0, temperatureC - 35.0) / 10.0;
+    final double voltageInstant = max(0.0, voltageV - 4.15) * 6.0;
+    final double cRateInstant = max(0.0, cRate - 0.8) * 2.0;
 
-    if (voltageV > 4.25 || voltageV < 3.3) {
-      score += 10;
-    }
+    _thermalExposureScore =
+        (_thermalExposureScore * 0.999) + thermalInstant * hours * 100;
+    _highVoltageExposureScore =
+        (_highVoltageExposureScore * 0.999) + voltageInstant * hours * 100;
+    _highCRateExposureScore =
+        (_highCRateExposureScore * 0.999) + cRateInstant * hours * 100;
+  }
 
-    if (measuredCapacityMah > 0) {
-      final double cRate = currentMa.abs() / measuredCapacityMah;
-      if (cRate > 0.8) {
-        score += (cRate - 0.8) * 35;
-      }
-    }
+  double _calculateStressScore(double measuredCapacityMah) {
+    final double cRate = measuredCapacityMah > 0
+        ? _ewmaCurrentMa.abs() / measuredCapacityMah
+        : 0;
 
-    return score.clamp(0, 100).toDouble();
+    final double thermalInstant = _ewmaTemperatureC <= 35
+        ? 0
+        : pow(_ewmaTemperatureC - 35, 1.35).toDouble() * 1.4;
+    final double voltageInstant = _ewmaVoltageV > 4.2
+        ? (_ewmaVoltageV - 4.2) * 220
+        : (_ewmaVoltageV < 3.35 ? (3.35 - _ewmaVoltageV) * 100 : 0);
+    final double cRateInstant = cRate > 0.8 ? (cRate - 0.8) * 35 : 0;
+
+    final double exposurePenalty = (_thermalExposureScore * 0.06) +
+        (_highVoltageExposureScore * 0.08) +
+        (_highCRateExposureScore * 0.09);
+
+    return (thermalInstant + voltageInstant + cRateInstant + exposurePenalty)
+        .clamp(0, 100)
+        .toDouble();
   }
 
   double _calculateHealthPercentage(
     int healthStatus,
     double measuredCapacityMah,
+    int designCapacityMah,
     double stressScore,
   ) {
-    final double capacityHealth =
-        (measuredCapacityMah / _designCapacityMah) * 100.0;
+    final double capacityHealth = designCapacityMah <= 0
+        ? 0
+        : (measuredCapacityMah / designCapacityMah) * 100.0;
 
     final double statusPenalty = switch (healthStatus) {
       2 => 0, // good
-      3 => 18, // overheat
-      4 => 45, // dead
-      5 => 20, // over voltage
-      6 => 28, // unspecified failure
-      7 => 12, // cold
-      _ => 8,
+      3 => 12, // overheat
+      4 => 40, // dead
+      5 => 16, // over voltage
+      6 => 24, // unspecified failure
+      7 => 10, // cold
+      _ => 6,
     };
 
-    final double stressPenalty = stressScore * 0.22;
-    final double health = capacityHealth - statusPenalty - stressPenalty;
-    return health.clamp(0, 100).toDouble();
+    final double cyclePenalty = min(22.0, _cycleCount * 0.018);
+    final double exposurePenalty = min(
+      16.0,
+      (_thermalExposureScore * 0.03) +
+          (_highVoltageExposureScore * 0.05) +
+          (_highCRateExposureScore * 0.05),
+    );
+    final double stressPenalty = stressScore * 0.16;
+
+    final double rawHealth = capacityHealth -
+        statusPenalty -
+        cyclePenalty -
+        exposurePenalty -
+        stressPenalty;
+
+    _smoothedHealthPercentage += (rawHealth - _smoothedHealthPercentage) * 0.12;
+    return _smoothedHealthPercentage.clamp(0, 100).toDouble();
   }
 
   String _getHealthString(int status, double healthPercentage) {
@@ -519,16 +813,16 @@ class RealBatteryService {
       return 'Cold';
     }
 
-    if (healthPercentage >= 90) {
+    if (healthPercentage >= 92) {
       return 'Excellent';
     }
-    if (healthPercentage >= 80) {
+    if (healthPercentage >= 84) {
       return 'Good';
     }
-    if (healthPercentage >= 70) {
+    if (healthPercentage >= 74) {
       return 'Fair';
     }
-    if (healthPercentage >= 55) {
+    if (healthPercentage >= 60) {
       return 'Aging';
     }
     return 'Weak';
@@ -588,6 +882,17 @@ class RealBatteryService {
     return fallback;
   }
 
+  String _cleanString(dynamic value) {
+    if (value == null) {
+      return 'Unknown';
+    }
+    final String text = value.toString().trim();
+    if (text.isEmpty) {
+      return 'Unknown';
+    }
+    return text;
+  }
+
   String _formatDuration(Duration duration) {
     final int hours = duration.inHours;
     final int minutes = duration.inMinutes.remainder(60);
@@ -615,8 +920,7 @@ class RealBatteryService {
     _totalChargingTime = Duration.zero;
     _totalDischargingTime = Duration.zero;
 
-
-    _smoothedCapacityMah = _designCapacityMah.toDouble();
+    _smoothedCapacityMah = _activeDesignCapacityMah.toDouble();
     _capacitySamples.clear();
     _cycleCount = 0;
     _throughputMahForCycle = 0;
@@ -627,6 +931,22 @@ class RealBatteryService {
     _sessionStartLevel = null;
     _sessionChargedMah = 0;
     _sessionDischargedMah = 0;
+    _lastChargeCounterMah = null;
+
+    _ewmaTemperatureC = 25;
+    _ewmaVoltageV = 3.85;
+    _ewmaCurrentMa = 0;
+    _thermalExposureScore = 0;
+    _highVoltageExposureScore = 0;
+    _highCRateExposureScore = 0;
+    _smoothedHealthPercentage = 90;
+
+    Future<void>(() async {
+      final SharedPreferences prefs =
+          _prefs ?? await SharedPreferences.getInstance();
+      _prefs = prefs;
+      await prefs.remove(_capacitySamplesKey);
+    }).catchError((_) {});
   }
 
   void dispose() {

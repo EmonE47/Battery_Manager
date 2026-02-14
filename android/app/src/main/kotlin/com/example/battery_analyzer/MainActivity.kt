@@ -124,6 +124,11 @@ class MainActivity : FlutterActivity() {
             "voltage" to voltage,
             "health" to health,
             "technology" to technology,
+            "manufacturer" to Build.MANUFACTURER,
+            "brand" to Build.BRAND,
+            "model" to Build.MODEL,
+            "device" to Build.DEVICE,
+            "product" to Build.PRODUCT,
             "timestamp" to System.currentTimeMillis()
         )
 
@@ -136,12 +141,6 @@ class MainActivity : FlutterActivity() {
             val chargeCounter = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
             if (chargeCounter > 0) {
                 data["chargeCounter"] = chargeCounter
-                if (chargeCounter > 1000000) {
-                    val fullChargeCapacityMah = chargeCounter / 1000
-                    if (fullChargeCapacityMah in 1000..30000) {
-                        data["fullChargeCapacity"] = fullChargeCapacityMah
-                    }
-                }
             }
 
             val capacity = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
@@ -153,9 +152,10 @@ class MainActivity : FlutterActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val energyCounter = batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER)
             if (energyCounter > 0 && voltage > 0) {
-                val designCapacityMah = (energyCounter * 1000L / voltage).toInt()
-                if (designCapacityMah in 1000..30000) {
-                    data["designCapacity"] = designCapacityMah
+                data["energyCounter"] = energyCounter
+                val remainingCapacityMah = (energyCounter * 1000L / voltage).toInt()
+                if (remainingCapacityMah in 1..30000) {
+                    data["remainingCapacityFromEnergy"] = remainingCapacityMah
                 }
             }
         }
