@@ -1,4 +1,3 @@
-// log_panel.dart implementation
 import 'package:flutter/material.dart';
 
 class LogPanel extends StatelessWidget {
@@ -13,29 +12,29 @@ class LogPanel extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'ACTIVITY LOG',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
+          children: <Widget>[
+            Text(
+              'Monitoring log',
+              style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 12),
             SizedBox(
-              height: 120,
+              height: 420,
               child: logs.isEmpty
-                  ? const Center(
-                      child: Text('Log will appear here'),
+                  ? Center(
+                      child: Text(
+                        'No events yet',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
                     )
                   : ListView.builder(
                       itemCount: logs.length,
-                      itemBuilder: (context, index) {
+                      itemBuilder: (BuildContext context, int index) {
                         return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          padding: const EdgeInsets.symmetric(vertical: 6),
                           child: Text(
                             logs[index],
-                            style: const TextStyle(fontSize: 12),
+                            style: Theme.of(context).textTheme.bodyMedium,
                           ),
                         );
                       },
