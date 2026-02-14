@@ -66,6 +66,79 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _batteryService.clearData();
   }
 
+  Future<void> _showDesignCapacityDialog() async {
+    final BuildContext rootContext = context;
+    final TextEditingController controller = TextEditingController(
+      text: (_batteryData.manualDesignCapacity ?? _batteryData.designCapacity)
+          .toString(),
+    );
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Design Capacity'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              TextField(
+                controller: controller,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Capacity (mAh)',
+                  hintText: 'Example: 5000',
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Set your battery design capacity manually for better health precision.',
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await _batteryService.setManualDesignCapacity(null);
+                if (!rootContext.mounted) return;
+                ScaffoldMessenger.of(rootContext).showSnackBar(
+                  const SnackBar(content: Text('Using auto design capacity')),
+                );
+              },
+              child: const Text('Auto'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final int? value = int.tryParse(controller.text.trim());
+                if (value == null || value < 800 || value > 15000) {
+                  if (!rootContext.mounted) return;
+                  ScaffoldMessenger.of(rootContext).showSnackBar(
+                    const SnackBar(
+                      content: Text('Enter a valid value between 800 and 15000'),
+                    ),
+                  );
+                  return;
+                }
+                Navigator.of(context).pop();
+                await _batteryService.setManualDesignCapacity(value);
+                if (!rootContext.mounted) return;
+                ScaffoldMessenger.of(rootContext).showSnackBar(
+                  SnackBar(content: Text('Manual capacity set: $value mAh')),
+                );
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   void dispose() {
     _tabController.dispose();
@@ -89,6 +162,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Design capacity',
+            onPressed: _showDesignCapacityDialog,
+            icon: const Icon(Icons.tune),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 16.0),
             child: Center(
@@ -529,7 +607,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   Widget _buildCapacityAnalysisCard() {
-    double designCapacity = 4000; // This should be from device
+    double designCapacity = _batteryData.designCapacity > 0
+        ? _batteryData.designCapacity.toDouble()
+        : 4000;
     double actualCapacity = _batteryData.actualCapacity;
     double capacityPercent = (actualCapacity / designCapacity * 100).clamp(0, 100);
 
@@ -594,6 +674,22 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 fontSize: 12,
                 color: Colors.grey,
               ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Design source: ${_batteryData.isDesignCapacityManual ? 'Manual' : 'Auto'}',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Device: ${_batteryData.manufacturer} ${_batteryData.model} (${_batteryData.device})',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 14),
+            OutlinedButton.icon(
+              onPressed: _showDesignCapacityDialog,
+              icon: const Icon(Icons.edit),
+              label: const Text('Set design capacity'),
             ),
           ],
         ),
