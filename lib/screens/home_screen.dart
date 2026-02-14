@@ -86,6 +86,80 @@ class _HomeScreenState extends State<HomeScreen>
     _batteryService.clearData();
   }
 
+  Future<void> _showDesignCapacityDialog() async {
+    final BuildContext rootContext = context;
+    final TextEditingController controller = TextEditingController(
+      text: (_batteryData.manualDesignCapacity ?? _batteryData.designCapacity)
+          .toString(),
+    );
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Design Capacity'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              TextField(
+                controller: controller,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Capacity (mAh)',
+                  hintText: 'Example: 5000',
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Set your battery design capacity manually for better health precision.',
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await _batteryService.setManualDesignCapacity(null);
+                if (!rootContext.mounted) return;
+                ScaffoldMessenger.of(rootContext).showSnackBar(
+                  const SnackBar(content: Text('Using auto design capacity')),
+                );
+              },
+              child: const Text('Auto'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final int? value = int.tryParse(controller.text.trim());
+                if (value == null || value < 800 || value > 15000) {
+                  if (!rootContext.mounted) return;
+                  ScaffoldMessenger.of(rootContext).showSnackBar(
+                    const SnackBar(
+                      content:
+                          Text('Enter a valid value between 800 and 15000'),
+                    ),
+                  );
+                  return;
+                }
+                Navigator.of(context).pop();
+                await _batteryService.setManualDesignCapacity(value);
+                if (!rootContext.mounted) return;
+                ScaffoldMessenger.of(rootContext).showSnackBar(
+                  SnackBar(content: Text('Manual capacity set: $value mAh')),
+                );
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _showThemePicker() async {
     await showModalBottomSheet<void>(
       context: context,
@@ -156,6 +230,11 @@ class _HomeScreenState extends State<HomeScreen>
             tooltip: 'Theme',
             onPressed: _showThemePicker,
             icon: const Icon(Icons.palette_outlined),
+          ),
+          IconButton(
+            tooltip: 'Design capacity',
+            onPressed: _showDesignCapacityDialog,
+            icon: const Icon(Icons.tune),
           ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
@@ -398,6 +477,9 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                   const SizedBox(height: 12),
                   _kvRow('Health score', '${health.toStringAsFixed(1)}%'),
+                  _kvRow('Device',
+                      '${_batteryData.manufacturer} ${_batteryData.model}'),
+                  _kvRow('Board', _batteryData.device),
                   _kvRow(
                     'Measured full capacity',
                     '${_batteryData.actualCapacity.toStringAsFixed(0)} mAh',
@@ -407,12 +489,28 @@ class _HomeScreenState extends State<HomeScreen>
                     '${_batteryData.designCapacity} mAh',
                   ),
                   _kvRow(
+                    'Design source',
+                    _batteryData.isDesignCapacityManual ? 'Manual' : 'Auto',
+                  ),
+                  _kvRow(
                     'Capacity ratio',
                     '${capacityPercent.toStringAsFixed(1)}%',
                   ),
                   _kvRow(
                     'Estimated remaining now',
                     '${_batteryData.capacity} mAh',
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _showDesignCapacityDialog,
+                          icon: const Icon(Icons.edit),
+                          label: const Text('Set design capacity'),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -497,21 +595,24 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildHistoryTab() {
     final int records = _history.length;
-    final int chargingRecords = _history.where((BatteryHistory e) => e.isCharging).length;
+    final int chargingRecords =
+        _history.where((BatteryHistory e) => e.isCharging).length;
     final int dischargingRecords = records - chargingRecords;
     final double avgLevel = records == 0
         ? 0
-        : _history.map((BatteryHistory e) => e.level).reduce((int a, int b) => a + b) /
+        : _history
+                .map((BatteryHistory e) => e.level)
+                .reduce((int a, int b) => a + b) /
             records;
 
-    final List<int> recentCurrents = _history
-        .reversed
+    final List<int> recentCurrents = _history.reversed
         .take(40)
         .map((BatteryHistory e) => e.current.abs())
         .toList();
     final double avgCurrent = recentCurrents.isEmpty
         ? 0
-        : recentCurrents.reduce((int a, int b) => a + b) / recentCurrents.length;
+        : recentCurrents.reduce((int a, int b) => a + b) /
+            recentCurrents.length;
 
     return RefreshIndicator(
       onRefresh: _startMonitoring,
@@ -779,7 +880,8 @@ class _HeroBatteryCard extends StatelessWidget {
                     children: <Widget>[
                       _inlineMetric('Current', _currentLabel(current)),
                       const SizedBox(height: 10),
-                      _inlineMetric('Voltage', '${voltage.toStringAsFixed(2)} V'),
+                      _inlineMetric(
+                          'Voltage', '${voltage.toStringAsFixed(2)} V'),
                       const SizedBox(height: 10),
                       _inlineMetric(
                         'Temperature',
