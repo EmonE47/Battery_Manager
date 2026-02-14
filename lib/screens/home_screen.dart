@@ -1,69 +1,138 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
-import 'package:battery_analyzer/utils/real_battery_service.dart';
-import 'package:battery_analyzer/widgets/battery_card.dart';
-import 'package:battery_analyzer/widgets/stat_card.dart';
-import 'package:battery_analyzer/widgets/status_indicator.dart';
-import 'package:battery_analyzer/widgets/history_panel.dart';
-import 'package:battery_analyzer/widgets/log_panel.dart';
+
 import '../models/battery_data.dart';
 import '../models/battery_history.dart';
+import '../utils/real_battery_service.dart';
+import '../widgets/history_panel.dart';
+import '../widgets/log_panel.dart';
+import '../widgets/stat_card.dart';
+import '../widgets/status_indicator.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
+
+  const HomeScreen({
+    super.key,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin {
   final RealBatteryService _batteryService = RealBatteryService();
-  bool _isMonitoring = false;
+
+  late final TabController _tabController;
+
   BatteryData _batteryData = BatteryData.empty();
-  List<BatteryHistory> _history = [];
-  List<String> _logs = [];
-  late TabController _tabController;
+  List<BatteryHistory> _history = <BatteryHistory>[];
+  List<String> _logs = <String>[];
+  bool _isMonitoring = false;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
     _setupListeners();
-    _addInitialLogs();
+    _bootstrapMonitoring();
+  }
+
+  Future<void> _bootstrapMonitoring() async {
+    final bool backgroundRunning =
+        await _batteryService.isBackgroundServiceRunning();
+    if (backgroundRunning) {
+      setState(() => _isMonitoring = true);
+    }
+
+    await _startMonitoring();
   }
 
   void _setupListeners() {
-    _batteryService.batteryDataStream.listen((data) {
+    _batteryService.batteryDataStream.listen((BatteryData data) {
+      if (!mounted) return;
       setState(() => _batteryData = data);
     });
 
-    _batteryService.historyStream.listen((history) {
-      setState(() => _history = history);
+    _batteryService.historyStream.listen((List<BatteryHistory> entries) {
+      if (!mounted) return;
+      setState(() => _history = entries);
     });
 
-    _batteryService.logStream.listen((logs) {
-      setState(() => _logs = logs);
+    _batteryService.logStream.listen((List<String> entries) {
+      if (!mounted) return;
+      setState(() => _logs = entries);
     });
   }
 
-  void _addInitialLogs() {
-    // Don't clear data on initialization - this preserves the initial log
-    // Future.delayed(Duration.zero, () {
-    //   _batteryService.clearData();
-    // });
-  }
-
-  void _startMonitoring() {
+  Future<void> _startMonitoring() async {
+    await _batteryService.startMonitoring();
+    if (!mounted) return;
     setState(() => _isMonitoring = true);
-    _batteryService.startMonitoring();
   }
 
-  void _stopMonitoring() {
+  Future<void> _stopMonitoring() async {
+    await _batteryService.stopMonitoring();
+    if (!mounted) return;
     setState(() => _isMonitoring = false);
-    _batteryService.stopMonitoring();
   }
 
   void _clearData() {
     _batteryService.clearData();
+  }
+
+  Future<void> _showThemePicker() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              ListTile(
+                leading: const Icon(Icons.brightness_auto),
+                title: const Text('System theme'),
+                trailing: widget.themeMode == ThemeMode.system
+                    ? const Icon(Icons.check)
+                    : null,
+                onTap: () {
+                  widget.onThemeModeChanged(ThemeMode.system);
+                  Navigator.of(context).pop();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.light_mode_outlined),
+                title: const Text('Light theme'),
+                trailing: widget.themeMode == ThemeMode.light
+                    ? const Icon(Icons.check)
+                    : null,
+                onTap: () {
+                  widget.onThemeModeChanged(ThemeMode.light);
+                  Navigator.of(context).pop();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.dark_mode_outlined),
+                title: const Text('Dark theme'),
+                trailing: widget.themeMode == ThemeMode.dark
+                    ? const Icon(Icons.check)
+                    : null,
+                onTap: () {
+                  widget.onThemeModeChanged(ThemeMode.dark);
+                  Navigator.of(context).pop();
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -75,599 +144,98 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme colors = theme.colorScheme;
+    final bool isDark = theme.brightness == Brightness.dark;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Battery Analyzer Pro'),
-        elevation: 0,
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(icon: Icon(Icons.dashboard), text: 'QUICK CHECK'),
-            Tab(icon: Icon(Icons.favorite), text: 'HEALTH'),
-            Tab(icon: Icon(Icons.show_chart), text: 'HISTORY'),
-            Tab(icon: Icon(Icons.info), text: 'DEBUG'),
-          ],
-        ),
-        actions: [
+        title: const Text('Battery Analyzer'),
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'Theme',
+            onPressed: _showThemePicker,
+            icon: const Icon(Icons.palette_outlined),
+          ),
           Padding(
-            padding: const EdgeInsets.only(right: 16.0),
-            child: Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  color: _isMonitoring ? Colors.green.withOpacity(0.3) : Colors.orange.withOpacity(0.3),
-                ),
-                child: Text(
-                  _isMonitoring ? '● MONITORING' : '○ IDLE',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: _isMonitoring ? Colors.green : Colors.orange,
-                  ),
-                ),
-              ),
+            padding: const EdgeInsets.only(right: 12),
+            child: FilledButton.tonalIcon(
+              onPressed: _isMonitoring ? _stopMonitoring : _startMonitoring,
+              icon: Icon(_isMonitoring ? Icons.stop : Icons.play_arrow),
+              label: Text(_isMonitoring ? 'Stop' : 'Start'),
             ),
           ),
         ],
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _buildQuickCheckTab(),
-          _buildHealthTab(),
-          _buildHistoryTab(),
-          _buildDebugTab(),
-        ],
-      ),
-    );
-  }
-
-  // ===== QUICK CHECK TAB =====
-  Widget _buildQuickCheckTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Large Battery Health Status
-          _buildHealthStatusCard(),
-          const SizedBox(height: 20),
-
-          // Current Battery Level with gauge
-          _buildBatteryGaugeCard(),
-          const SizedBox(height: 20),
-
-          // Quick Status
-          StatusIndicator(
-            isCharging: _batteryData.isCharging,
-            health: _batteryData.health,
-            current: _batteryData.current,
-          ),
-          const SizedBox(height: 20),
-
-          // Quick Stats Grid
-          _buildQuickStatsGrid(),
-          const SizedBox(height: 20),
-
-          // Control Buttons
-          _buildControlButtons(),
-        ],
-      ),
-    );
-  }
-
-  // ===== HEALTH TAB =====
-  Widget _buildHealthTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Health Score Card
-          _buildDetailedHealthCard(),
-          const SizedBox(height: 20),
-
-          // Capacity Analysis
-          _buildCapacityAnalysisCard(),
-          const SizedBox(height: 20),
-
-          // Temperature Analysis
-          _buildTemperatureAnalysisCard(),
-          const SizedBox(height: 20),
-
-          // Degradation Info
-          _buildDegradationCard(),
-          const SizedBox(height: 20),
-
-          // Charge Statistics
-          _buildDetailedChargeStatsCard(),
-        ],
-      ),
-    );
-  }
-
-  // ===== HISTORY TAB =====
-  Widget _buildHistoryTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'BATTERY HISTORY',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
-          ),
-          const SizedBox(height: 16),
-          HistoryPanel(history: _history),
-          const SizedBox(height: 20),
-          // Add simple trend info
-          _buildTrendSummary(),
-        ],
-      ),
-    );
-  }
-
-  // ===== DEBUG TAB =====
-  Widget _buildDebugTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          LogPanel(logs: _logs),
-        ],
-      ),
-    );
-  }
-
-  // ===== WIDGET BUILDERS =====
-
-  Widget _buildHealthStatusCard() {
-    double health = _batteryData.healthPercentage;
-    Color healthColor = _getHealthColor(health);
-    String healthStatus = _getHealthStatus(health);
-
-    return Card(
-      elevation: 8,
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          children: [
-            // Large health percentage circle
-            Container(
-              width: 120,
-              height: 120,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: LinearGradient(
-                  colors: [healthColor, healthColor.withOpacity(0.5)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-              ),
-              child: Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      '${health.toStringAsFixed(0)}%',
-                      style: const TextStyle(
-                        fontSize: 36,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
-                    ),
-                    Text(
-                      'HEALTH',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.white.withOpacity(0.7),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              healthStatus,
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: healthColor,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              _getHealthRecommendation(health),
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
-                height: 1.5,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildBatteryGaugeCard() {
-    int level = _batteryData.level;
-    Color levelColor = level > 50 ? Colors.green : (level > 20 ? Colors.orange : Colors.red);
-
-    return Card(
-      elevation: 8,
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Current Level',
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: Colors.grey,
-                  ),
-                ),
-                Text(
-                  '$level%',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: levelColor,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: LinearProgressIndicator(
-                value: level / 100,
-                minHeight: 16,
-                backgroundColor: Colors.grey[700],
-                valueColor: AlwaysStoppedAnimation<Color>(levelColor),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Status: ${_batteryData.isCharging ? '🔌 Charging' : '⚡ Discharging'}',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: _batteryData.isCharging ? Colors.green : Colors.orange,
-                  ),
-                ),
-                if (_batteryData.isCharging && _batteryData.chargingRate > 0)
-                  Text(
-                    'Rate: ${_batteryData.chargingRate.toInt()} mA/h',
-                    style: const TextStyle(fontSize: 12, color: Colors.green),
-                  )
-                else if (!_batteryData.isCharging && _batteryData.dischargingRate > 0)
-                  Text(
-                    'Rate: ${_batteryData.dischargingRate.toInt()} mA/h',
-                    style: const TextStyle(fontSize: 12, color: Colors.orange),
-                  ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildQuickStatsGrid() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'QUICK STATS',
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.bold,
-            color: Colors.white70,
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: <Color>[
+              isDark
+                  ? colors.surfaceContainerHighest.withValues(alpha: 0.34)
+                  : colors.primaryContainer.withValues(alpha: 0.44),
+              theme.scaffoldBackgroundColor,
+            ],
           ),
         ),
-        const SizedBox(height: 12),
-        GridView.count(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisCount: 3,
-          childAspectRatio: 1.0,
-          mainAxisSpacing: 8,
-          crossAxisSpacing: 8,
-          children: [
-            StatCard(
-              icon: Icons.thermostat,
-              title: 'TEMP',
-              value: '${_batteryData.temperature.toStringAsFixed(1)}°C',
-              color: _getTempColor(_batteryData.temperature),
-            ),
-            StatCard(
-              icon: Icons.bolt,
-              title: 'VOLTAGE',
-              value: '${_batteryData.voltage.toStringAsFixed(2)}V',
-              color: Colors.purple,
-            ),
-            StatCard(
-              icon: Icons.battery_charging_full,
-              title: 'CAPACITY',
-              value: '${_batteryData.actualCapacity.toInt()}mAh',
-              color: Colors.amber,
-            ),
-            StatCard(
-              icon: Icons.repeat,
-              title: 'CYCLES',
-              value: '${_batteryData.cycleCount}',
-              color: Colors.blue,
-            ),
-            StatCard(
-              icon: Icons.science,
-              title: 'TECH',
-              value: _batteryData.technology,
-              color: Colors.pink,
-            ),
-            StatCard(
-              icon: Icons.timer,
-              title: 'USAGE',
-              value: '${(_batteryData.chargingTime.inHours + _batteryData.dischargingTime.inHours)}h',
-              color: Colors.cyan,
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildDetailedHealthCard() {
-    double health = _batteryData.healthPercentage;
-    double degradation = 100 - health;
-
-    return Card(
-      elevation: 8,
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Battery Health Analysis',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 16),
-            // Health bar
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text('Overall Health', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    Text(
-                      '${health.toStringAsFixed(1)}%',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        color: _getHealthColor(health),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: LinearProgressIndicator(
-                    value: health / 100,
-                    minHeight: 12,
-                    backgroundColor: Colors.grey[700],
-                    valueColor: AlwaysStoppedAnimation<Color>(_getHealthColor(health)),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Divider(color: Colors.grey[700]),
-            const SizedBox(height: 16),
-            // Health factors
-            _buildHealthFactorRow('Temperature', _batteryData.temperature, '0-45°C', _getTempColor(_batteryData.temperature)),
-            const SizedBox(height: 12),
-            _buildHealthFactorRow('Voltage', _batteryData.voltage, '3.7-4.2V', _getVoltageColor(_batteryData.voltage)),
-            const SizedBox(height: 12),
-            _buildHealthFactorRow('Status', _batteryData.health == 'Good' ? 1.0 : 0.7, 'Status OK', _getStatusColor(_batteryData.health)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildHealthFactorRow(String label, double value, String range, Color color) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: value is double ? (value / 100).clamp(0, 1) : value.clamp(0.0, 1.0),
-                minHeight: 4,
-                backgroundColor: Colors.grey[700],
-                valueColor: AlwaysStoppedAnimation<Color>(color),
-              ),
-            ),
-          ),
-        ),
-        Text(
-          range,
-          style: TextStyle(fontSize: 11, color: color),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCapacityAnalysisCard() {
-    double designCapacity = 4000; // This should be from device
-    double actualCapacity = _batteryData.actualCapacity;
-    double capacityPercent = (actualCapacity / designCapacity * 100).clamp(0, 100);
-
-    return Card(
-      elevation: 8,
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Capacity Analysis',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Design Capacity', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    Text(
-                      '${designCapacity.toInt()} mAh',
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
-                    ),
-                  ],
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    const Text('Actual Capacity', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    Text(
-                      '${actualCapacity.toInt()} mAh',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _getCapacityColor(capacityPercent)),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            // Capacity degradation
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: LinearProgressIndicator(
-                value: capacityPercent / 100,
-                minHeight: 12,
-                backgroundColor: Colors.grey[700],
-                valueColor: AlwaysStoppedAnimation<Color>(_getCapacityColor(capacityPercent)),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Capacity: ${capacityPercent.toStringAsFixed(1)}% of original',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTemperatureAnalysisCard() {
-    double temp = _batteryData.temperature;
-    String tempStatus = _getTemperatureStatus(temp);
-
-    return Card(
-      elevation: 8,
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Temperature Status',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Current', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    Text(
-                      '${temp.toStringAsFixed(1)}°C',
-                      style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                        color: _getTempColor(temp),
-                      ),
-                    ),
-                  ],
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    const Text('Status', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    Text(
-                      tempStatus,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        color: _getTempColor(temp),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            // Temperature range info
+          children: <Widget>[
             Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildTempRangeItem('🟢 Optimal', '10-25°C'),
-                  const SizedBox(height: 8),
-                  _buildTempRangeItem('🟡 Normal', '25-45°C'),
-                  const SizedBox(height: 8),
-                  _buildTempRangeItem('🔴 Hot', '>45°C'),
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: _InfoPill(
+                          label: 'Current',
+                          value: _formatSignedCurrent(_batteryData.current),
+                          icon: _batteryData.current >= 0
+                              ? Icons.north_east
+                              : Icons.south_east,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: _InfoPill(
+                          label: 'Level',
+                          value: '${_batteryData.level}%',
+                          icon: Icons.battery_std_rounded,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: _InfoPill(
+                          label: 'Capacity',
+                          value: '${_batteryData.actualCapacity.toInt()} mAh',
+                          icon: Icons.battery_full,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TabBar(
+                    controller: _tabController,
+                    tabs: const <Tab>[
+                      Tab(text: 'Overview', icon: Icon(Icons.dashboard)),
+                      Tab(text: 'Health', icon: Icon(Icons.favorite)),
+                      Tab(text: 'History', icon: Icon(Icons.show_chart)),
+                      Tab(text: 'Logs', icon: Icon(Icons.terminal)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: TabBarView(
+                controller: _tabController,
+                children: <Widget>[
+                  _buildOverviewTab(),
+                  _buildHealthTab(),
+                  _buildHistoryTab(),
+                  _buildLogsTab(),
                 ],
               ),
             ),
@@ -677,158 +245,555 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     );
   }
 
-  Widget _buildTempRangeItem(String label, String range) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(label, style: const TextStyle(fontSize: 12)),
-        Text(range, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-      ],
+  Widget _buildOverviewTab() {
+    return RefreshIndicator(
+      onRefresh: _startMonitoring,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+        children: <Widget>[
+          _HeroBatteryCard(
+            level: _batteryData.level,
+            isCharging: _batteryData.isCharging,
+            current: _batteryData.current,
+            health: _batteryData.health,
+            voltage: _batteryData.voltage,
+            temperature: _batteryData.temperature,
+            timeToFullHours: _batteryData.projectedTimeToFullHours,
+            timeToEmptyHours: _batteryData.projectedTimeToEmptyHours,
+          ),
+          const SizedBox(height: 14),
+          StatusIndicator(
+            isCharging: _batteryData.isCharging,
+            health: _batteryData.health,
+            current: _batteryData.current,
+          ),
+          const SizedBox(height: 14),
+          GridView.count(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            crossAxisCount: 3,
+            childAspectRatio: 1.03,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+            children: <Widget>[
+              StatCard(
+                icon: Icons.thermostat,
+                title: 'Temp',
+                value: '${_batteryData.temperature.toStringAsFixed(1)} C',
+                color: _temperatureColor(_batteryData.temperature),
+              ),
+              StatCard(
+                icon: Icons.bolt,
+                title: 'Voltage',
+                value: '${_batteryData.voltage.toStringAsFixed(2)} V',
+                color: Colors.amber,
+              ),
+              StatCard(
+                icon: Icons.flash_on,
+                title: 'Power',
+                value: '${_batteryData.averagePowerMw.toStringAsFixed(0)} mW',
+                color: Colors.deepOrange,
+              ),
+              StatCard(
+                icon: Icons.update,
+                title: 'Cycles',
+                value: _batteryData.cycleCount.toString(),
+                color: Colors.blue,
+              ),
+              StatCard(
+                icon: Icons.timelapse,
+                title: 'Charging',
+                value: _formatDuration(_batteryData.chargingTime),
+                color: Colors.green,
+              ),
+              StatCard(
+                icon: Icons.timelapse_outlined,
+                title: 'Discharge',
+                value: _formatDuration(_batteryData.dischargingTime),
+                color: Colors.red,
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    'Throughput counters',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 10),
+                  _kvRow('Charged since start',
+                      '${_batteryData.chargedSinceStart.toStringAsFixed(1)} mAh'),
+                  _kvRow(
+                    'Discharged since start',
+                    '${_batteryData.dischargedSinceStart.toStringAsFixed(1)} mAh',
+                  ),
+                  _kvRow(
+                    'Net battery flow',
+                    '${_batteryData.netMahSinceStart.toStringAsFixed(1)} mAh',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  onPressed: _clearData,
+                  icon: const Icon(Icons.cleaning_services_outlined),
+                  label: const Text('Reset samples'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _buildDegradationCard() {
-    double health = _batteryData.healthPercentage;
-    double degradation = 100 - health;
-    int cycleCount = _batteryData.cycleCount;
+  Widget _buildHealthTab() {
+    final double capacityPercent = _batteryData.designCapacity <= 0
+        ? 0
+        : (_batteryData.actualCapacity / _batteryData.designCapacity) * 100;
+    final double health = _batteryData.healthPercentage.clamp(0, 100);
+    final double stress = _batteryData.stressScore.clamp(0, 100);
+    final ThemeData theme = Theme.of(context);
+
+    return RefreshIndicator(
+      onRefresh: _startMonitoring,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+        children: <Widget>[
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    'Measured battery health',
+                    style: theme.textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 12),
+                  TweenAnimationBuilder<double>(
+                    tween: Tween<double>(begin: 0, end: health / 100),
+                    duration: const Duration(milliseconds: 550),
+                    builder: (BuildContext context, double value, _) {
+                      return ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: LinearProgressIndicator(
+                          minHeight: 14,
+                          value: value,
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  _kvRow('Health score', '${health.toStringAsFixed(1)}%'),
+                  _kvRow(
+                    'Measured full capacity',
+                    '${_batteryData.actualCapacity.toStringAsFixed(0)} mAh',
+                  ),
+                  _kvRow(
+                    'Design capacity',
+                    '${_batteryData.designCapacity} mAh',
+                  ),
+                  _kvRow(
+                    'Capacity ratio',
+                    '${capacityPercent.toStringAsFixed(1)}%',
+                  ),
+                  _kvRow(
+                    'Estimated remaining now',
+                    '${_batteryData.capacity} mAh',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text('Stress and wear', style: theme.textTheme.titleLarge),
+                  const SizedBox(height: 12),
+                  TweenAnimationBuilder<double>(
+                    tween: Tween<double>(begin: 0, end: stress / 100),
+                    duration: const Duration(milliseconds: 550),
+                    builder: (BuildContext context, double value, _) {
+                      return ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: LinearProgressIndicator(
+                          minHeight: 12,
+                          value: value,
+                          color: _stressColor(stress),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  _kvRow('Stress score', '${stress.toStringAsFixed(1)}/100'),
+                  _kvRow(
+                    'Charge rate',
+                    '${_batteryData.chargingRate.toStringAsFixed(0)} mA',
+                  ),
+                  _kvRow(
+                    'Discharge rate',
+                    '${_batteryData.dischargingRate.toStringAsFixed(0)} mA',
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _healthAdvice(_batteryData),
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text('AccuBattery-style estimates',
+                      style: theme.textTheme.titleLarge),
+                  const SizedBox(height: 12),
+                  _kvRow('Predicted time to full',
+                      _formatHours(_batteryData.projectedTimeToFullHours)),
+                  _kvRow('Predicted time to empty',
+                      _formatHours(_batteryData.projectedTimeToEmptyHours)),
+                  _kvRow(
+                    'Charge throughput',
+                    '${_batteryData.chargedSinceStart.toStringAsFixed(1)} mAh',
+                  ),
+                  _kvRow(
+                    'Discharge throughput',
+                    '${_batteryData.dischargedSinceStart.toStringAsFixed(1)} mAh',
+                  ),
+                  _kvRow(
+                    'Equivalent cycles',
+                    _batteryData.cycleCount.toString(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHistoryTab() {
+    final int records = _history.length;
+    final int chargingRecords = _history.where((BatteryHistory e) => e.isCharging).length;
+    final int dischargingRecords = records - chargingRecords;
+    final double avgLevel = records == 0
+        ? 0
+        : _history.map((BatteryHistory e) => e.level).reduce((int a, int b) => a + b) /
+            records;
+
+    final List<int> recentCurrents = _history
+        .reversed
+        .take(40)
+        .map((BatteryHistory e) => e.current.abs())
+        .toList();
+    final double avgCurrent = recentCurrents.isEmpty
+        ? 0
+        : recentCurrents.reduce((int a, int b) => a + b) / recentCurrents.length;
+
+    return RefreshIndicator(
+      onRefresh: _startMonitoring,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+        children: <Widget>[
+          HistoryPanel(history: _history),
+          const SizedBox(height: 14),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text('Trend summary',
+                      style: Theme.of(context).textTheme.titleLarge),
+                  const SizedBox(height: 10),
+                  _kvRow('Records', '$records'),
+                  _kvRow('Charging records', '$chargingRecords'),
+                  _kvRow('Discharging records', '$dischargingRecords'),
+                  _kvRow('Average level', '${avgLevel.toStringAsFixed(1)}%'),
+                  _kvRow('Average absolute current',
+                      '${avgCurrent.toStringAsFixed(0)} mA'),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLogsTab() {
+    return RefreshIndicator(
+      onRefresh: _startMonitoring,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+        children: <Widget>[
+          LogPanel(logs: _logs),
+        ],
+      ),
+    );
+  }
+
+  Widget _kvRow(String key, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Text(
+              key,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _temperatureColor(double temp) {
+    if (temp <= 10) return Colors.lightBlue;
+    if (temp <= 35) return Colors.green;
+    if (temp <= 42) return Colors.orange;
+    return Colors.red;
+  }
+
+  Color _stressColor(double stress) {
+    if (stress < 25) return Colors.green;
+    if (stress < 55) return Colors.orange;
+    return Colors.red;
+  }
+
+  String _formatSignedCurrent(int current) {
+    if (current > 0) {
+      return '+$current mA';
+    }
+    if (current < 0) {
+      return '$current mA';
+    }
+    return '0 mA';
+  }
+
+  String _formatDuration(Duration duration) {
+    final int hours = duration.inHours;
+    final int minutes = duration.inMinutes.remainder(60);
+    if (hours > 0) {
+      return '${hours}h ${minutes}m';
+    }
+    return '${duration.inMinutes}m';
+  }
+
+  String _formatHours(double hours) {
+    if (hours <= 0 || hours.isNaN || hours.isInfinite) {
+      return 'N/A';
+    }
+    final int totalMinutes = (hours * 60).round();
+    final int h = totalMinutes ~/ 60;
+    final int m = totalMinutes % 60;
+    return '${h}h ${m}m';
+  }
+
+  String _healthAdvice(BatteryData data) {
+    final double stress = data.stressScore;
+    if (stress > 65) {
+      return 'High stress detected. Reduce heat and avoid sustained heavy load while charging.';
+    }
+    if (data.temperature > 42) {
+      return 'Battery temperature is high. Remove case or reduce fast charging sessions.';
+    }
+    if (data.healthPercentage < 75) {
+      return 'Health is below 75%. Avoid deep discharge and keep charge between 20% and 80% when possible.';
+    }
+    return 'Battery conditions are stable. Continue tracking more full sessions for better calibration.';
+  }
+}
+
+class _InfoPill extends StatelessWidget {
+  final String label;
+  final String value;
+  final IconData icon;
+
+  const _InfoPill({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme colors = Theme.of(context).colorScheme;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      decoration: BoxDecoration(
+        color: colors.surface.withValues(alpha: 0.8),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.4)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Row(
+        children: <Widget>[
+          Icon(icon, size: 18, color: colors.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text(label, style: Theme.of(context).textTheme.bodyMedium),
+                const SizedBox(height: 1),
+                Text(value, style: Theme.of(context).textTheme.titleSmall),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeroBatteryCard extends StatelessWidget {
+  final int level;
+  final bool isCharging;
+  final int current;
+  final String health;
+  final double voltage;
+  final double temperature;
+  final double timeToFullHours;
+  final double timeToEmptyHours;
+
+  const _HeroBatteryCard({
+    required this.level,
+    required this.isCharging,
+    required this.current,
+    required this.health,
+    required this.voltage,
+    required this.temperature,
+    required this.timeToFullHours,
+    required this.timeToEmptyHours,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme colors = theme.colorScheme;
+    final double progress = (level / 100).clamp(0, 1);
+    final Color fill = Color.lerp(Colors.red, Colors.green, progress)!;
 
     return Card(
-      elevation: 8,
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
+      clipBehavior: Clip.antiAlias,
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: <Color>[
+              colors.primaryContainer.withValues(alpha: 0.7),
+              colors.surfaceContainerHigh,
+            ],
+          ),
+        ),
+        padding: const EdgeInsets.all(18),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Degradation Report',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    isCharging ? 'Charging now' : 'Discharging now',
+                    style: theme.textTheme.titleLarge,
+                  ),
+                ),
+                Chip(
+                  avatar: Icon(
+                    isCharging ? Icons.bolt : Icons.power,
+                    size: 18,
+                  ),
+                  label: Text(health),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Total Degradation', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    Text(
-                      '${degradation.toStringAsFixed(1)}%',
-                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.orange),
-                    ),
-                  ],
+              children: <Widget>[
+                SizedBox(
+                  width: 110,
+                  height: 110,
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween<double>(begin: 0, end: progress),
+                    duration: const Duration(milliseconds: 500),
+                    builder: (BuildContext context, double value, _) {
+                      return Stack(
+                        fit: StackFit.expand,
+                        children: <Widget>[
+                          CircularProgressIndicator(
+                            value: 1,
+                            strokeWidth: 9,
+                            color: colors.surfaceContainerHighest,
+                          ),
+                          CircularProgressIndicator(
+                            value: value,
+                            strokeWidth: 9,
+                            color: fill,
+                          ),
+                          Center(
+                            child: Text(
+                              '$level%',
+                              style: theme.textTheme.headlineSmall,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    const Text('Cycles', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    Text(
-                      cycleCount.toString(),
-                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.cyan),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            const Divider(),
-            const SizedBox(height: 12),
-            Text(
-              _getDegradationForecast(health, cycleCount),
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
-                height: 1.6,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDetailedChargeStatsCard() {
-    String timeToFull = 'N/A';
-    if (_batteryData.isCharging && _batteryData.chargingRate > 0) {
-      int remainingCapacity = _batteryData.actualCapacity.toInt() - 
-          (_batteryData.level * _batteryData.actualCapacity.toInt() ~/ 100);
-      int minutesToFull = (remainingCapacity / (_batteryData.chargingRate / 60)).toInt();
-      timeToFull = '${(minutesToFull / 60).toStringAsFixed(1)}h ${minutesToFull % 60}m';
-    }
-
-    String timeToEmpty = 'N/A';
-    if (!_batteryData.isCharging && _batteryData.dischargingRate > 0) {
-      int capacityRemaining = (_batteryData.level * _batteryData.actualCapacity.toInt()) ~/ 100;
-      int minutesToEmpty = (capacityRemaining / (_batteryData.dischargingRate / 60)).toInt();
-      timeToEmpty = '${(minutesToEmpty / 60).toStringAsFixed(1)}h ${minutesToEmpty % 60}m';
-    }
-
-    return Card(
-      elevation: 8,
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Charge Statistics',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 16),
-            GridView.count(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              crossAxisCount: 2,
-              childAspectRatio: 1.3,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              children: [
-                _buildStatCardDetailed(
-                  'Charge Rate',
-                  '${_batteryData.chargingRate.toInt()} mA/h',
-                  Colors.green,
-                  Icons.electric_bolt,
-                ),
-                _buildStatCardDetailed(
-                  'Discharge Rate',
-                  '${_batteryData.dischargingRate.toInt()} mA/h',
-                  Colors.red,
-                  Icons.power_off,
-                ),
-                _buildStatCardDetailed(
-                  'Time to Full',
-                  timeToFull,
-                  Colors.blue,
-                  Icons.timer,
-                ),
-                _buildStatCardDetailed(
-                  'Time to Empty',
-                  timeToEmpty,
-                  Colors.orange,
-                  Icons.timer_off,
-                ),
-                _buildStatCardDetailed(
-                  'Total Time Charging',
-                  '${_batteryData.chargingTime.inHours}h',
-                  Colors.cyan,
-                  Icons.hourglass_bottom,
-                ),
-                _buildStatCardDetailed(
-                  'Total Time Discharging',
-                  '${_batteryData.dischargingTime.inHours}h',
-                  Colors.amber,
-                  Icons.hourglass_top,
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    children: <Widget>[
+                      _inlineMetric('Current', _currentLabel(current)),
+                      const SizedBox(height: 10),
+                      _inlineMetric('Voltage', '${voltage.toStringAsFixed(2)} V'),
+                      const SizedBox(height: 10),
+                      _inlineMetric(
+                        'Temperature',
+                        '${temperature.toStringAsFixed(1)} C',
+                      ),
+                      const SizedBox(height: 10),
+                      _inlineMetric(
+                        isCharging ? 'To full' : 'To empty',
+                        isCharging
+                            ? _formatHours(timeToFullHours)
+                            : _formatHours(timeToEmptyHours),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -838,185 +803,29 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     );
   }
 
-  Widget _buildStatCardDetailed(String title, String value, Color color, IconData icon) {
-    return Card(
-      color: Colors.grey[850],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 24, color: color),
-            const SizedBox(height: 8),
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 10,
-                color: Colors.grey,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              value,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.bold,
-                color: color,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTrendSummary() {
-    return Card(
-      elevation: 8,
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Trend Summary',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 16),
-            _buildTrendItem('Average Level', '${(_history.isNotEmpty ? (_history.map((h) => h.level).reduce((a, b) => a + b) ~/ _history.length) : 0)}%'),
-            const SizedBox(height: 12),
-            _buildTrendItem('Total Records', '${_history.length} entries'),
-            const SizedBox(height: 12),
-            _buildTrendItem('Charging Times', '${_history.where((h) => h.isCharging).length} records'),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTrendItem(String label, String value) {
+  Widget _inlineMetric(String label, String value) {
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-        Text(value, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white)),
-      ],
-    );
-  }
-
-  Widget _buildControlButtons() {
-    return Row(
-      children: [
-        Expanded(
-          child: ElevatedButton.icon(
-            onPressed: _isMonitoring ? null : _startMonitoring,
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('START'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.green,
-              padding: const EdgeInsets.symmetric(vertical: 16),
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: ElevatedButton.icon(
-            onPressed: _isMonitoring ? _stopMonitoring : null,
-            icon: const Icon(Icons.stop),
-            label: const Text('STOP'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              padding: const EdgeInsets.symmetric(vertical: 16),
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: ElevatedButton.icon(
-            onPressed: _clearData,
-            icon: const Icon(Icons.clear),
-            label: const Text('CLEAR'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.orange,
-              padding: const EdgeInsets.symmetric(vertical: 16),
-            ),
-          ),
+      children: <Widget>[
+        Expanded(child: Text(label)),
+        Text(
+          value,
+          style: const TextStyle(fontWeight: FontWeight.w700),
         ),
       ],
     );
   }
 
-  // ===== HELPER METHODS =====
-
-  Color _getHealthColor(double percentage) {
-    if (percentage >= 80) return Colors.green;
-    if (percentage >= 60) return Colors.orange;
-    if (percentage >= 40) return Colors.deepOrange;
-    return Colors.red;
+  static String _currentLabel(int current) {
+    if (current > 0) return '+$current mA';
+    if (current < 0) return '$current mA';
+    return '0 mA';
   }
 
-  Color _getTempColor(double celsius) {
-    if (celsius < 10) return Colors.cyan;
-    if (celsius <= 25) return Colors.green;
-    if (celsius <= 35) return Colors.lime;
-    if (celsius <= 45) return Colors.orange;
-    return Colors.red;
-  }
-
-  Color _getVoltageColor(double voltage) {
-    if (voltage >= 4.0 && voltage <= 4.2) return Colors.green;
-    if (voltage >= 3.7 && voltage < 4.0) return Colors.orange;
-    return Colors.red;
-  }
-
-  Color _getCapacityColor(double capacityPercent) {
-    if (capacityPercent >= 85) return Colors.green;
-    if (capacityPercent >= 70) return Colors.lime;
-    if (capacityPercent >= 50) return Colors.orange;
-    return Colors.red;
-  }
-
-  Color _getStatusColor(String status) {
-    return status == 'Good' ? Colors.green : Colors.orange;
-  }
-
-  String _getHealthStatus(double health) {
-    if (health >= 90) return '✅ Excellent';
-    if (health >= 80) return '✅ Good';
-    if (health >= 70) return '⚠️ Fair';
-    if (health >= 50) return '⚠️ Poor';
-    return '❌ Critical';
-  }
-
-  String _getHealthRecommendation(double health) {
-    if (health >= 80) {
-      return 'Your battery is in excellent condition. Continue normal usage.';
-    } else if (health >= 60) {
-      return 'Your battery is showing signs of aging. Consider reducing screen time.';
-    } else {
-      return 'Battery health is degraded. Consider servicing or replacement soon.';
+  static String _formatHours(double hours) {
+    if (hours <= 0 || hours.isInfinite || hours.isNaN) {
+      return 'N/A';
     }
-  }
-
-  String _getTemperatureStatus(double celsius) {
-    if (celsius < 10) return 'Cold ❄️';
-    if (celsius <= 25) return 'Optimal ✅';
-    if (celsius <= 35) return 'Warm ⚠️';
-    if (celsius <= 45) return 'Hot 🔥';
-    return 'Critical 🚨';
-  }
-
-  String _getDegradationForecast(double health, int cycles) {
-    double estimatedRemainingYears = (health / 100) * 5; // Assume 5-year life at 100%
-    return 'Based on current degradation rate and $cycles charge cycles, your battery may last approximately ${estimatedRemainingYears.toStringAsFixed(1)} more years.';
+    final int minutes = max(1, (hours * 60).round());
+    return '${minutes ~/ 60}h ${minutes % 60}m';
   }
 }
