@@ -24,6 +24,12 @@ class BatteryData {
   final double stressScore;
   final double projectedTimeToFullHours;
   final double projectedTimeToEmptyHours;
+  final String manufacturer;
+  final String brand;
+  final String model;
+  final String device;
+  final bool isDesignCapacityManual;
+  final int? manualDesignCapacity;
 
   const BatteryData({
     required this.level,
@@ -51,6 +57,12 @@ class BatteryData {
     this.stressScore = 0,
     this.projectedTimeToFullHours = 0,
     this.projectedTimeToEmptyHours = 0,
+    this.manufacturer = 'Unknown',
+    this.brand = 'Unknown',
+    this.model = 'Unknown',
+    this.device = 'Unknown',
+    this.isDesignCapacityManual = false,
+    this.manualDesignCapacity,
   });
 
   factory BatteryData.empty() {
@@ -69,6 +81,7 @@ class BatteryData {
       healthPercentage: 0,
       actualCapacity: 0,
       designCapacity: 0,
+      manualDesignCapacity: null,
     );
   }
 
@@ -98,6 +111,12 @@ class BatteryData {
     double? stressScore,
     double? projectedTimeToFullHours,
     double? projectedTimeToEmptyHours,
+    String? manufacturer,
+    String? brand,
+    String? model,
+    String? device,
+    bool? isDesignCapacityManual,
+    int? manualDesignCapacity,
   }) {
     return BatteryData(
       level: level ?? this.level,
@@ -127,6 +146,13 @@ class BatteryData {
           projectedTimeToFullHours ?? this.projectedTimeToFullHours,
       projectedTimeToEmptyHours:
           projectedTimeToEmptyHours ?? this.projectedTimeToEmptyHours,
+      manufacturer: manufacturer ?? this.manufacturer,
+      brand: brand ?? this.brand,
+      model: model ?? this.model,
+      device: device ?? this.device,
+      isDesignCapacityManual:
+          isDesignCapacityManual ?? this.isDesignCapacityManual,
+      manualDesignCapacity: manualDesignCapacity ?? this.manualDesignCapacity,
     );
   }
 }
