@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
+import '../models/app_battery_usage.dart';
 import '../models/battery_data.dart';
 import '../models/battery_history.dart';
 import '../utils/real_battery_service.dart';
@@ -33,12 +34,14 @@ class _HomeScreenState extends State<HomeScreen>
   BatteryData _batteryData = BatteryData.empty();
   List<BatteryHistory> _history = <BatteryHistory>[];
   List<String> _logs = <String>[];
+  List<AppBatteryUsage> _appUsage = <AppBatteryUsage>[];
   bool _isMonitoring = false;
+  bool _hasUsageAccess = false;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     _setupListeners();
     _bootstrapMonitoring();
   }
@@ -68,6 +71,16 @@ class _HomeScreenState extends State<HomeScreen>
       if (!mounted) return;
       setState(() => _logs = entries);
     });
+
+    _batteryService.appUsageStream.listen((List<AppBatteryUsage> entries) {
+      if (!mounted) return;
+      setState(() => _appUsage = entries);
+    });
+
+    _batteryService.usageAccessStream.listen((bool granted) {
+      if (!mounted) return;
+      setState(() => _hasUsageAccess = granted);
+    });
   }
 
   Future<void> _startMonitoring() async {
@@ -84,6 +97,10 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _clearData() {
     _batteryService.clearData();
+  }
+
+  Future<void> _openUsageAccessSettings() async {
+    await _batteryService.openUsageAccessSettings();
   }
 
   Future<void> _showDesignCapacityDialog() async {
@@ -300,6 +317,7 @@ class _HomeScreenState extends State<HomeScreen>
                     tabs: const <Tab>[
                       Tab(text: 'Overview', icon: Icon(Icons.dashboard)),
                       Tab(text: 'Health', icon: Icon(Icons.favorite)),
+                      Tab(text: 'Apps', icon: Icon(Icons.apps)),
                       Tab(text: 'History', icon: Icon(Icons.show_chart)),
                       Tab(text: 'Logs', icon: Icon(Icons.terminal)),
                     ],
@@ -313,6 +331,7 @@ class _HomeScreenState extends State<HomeScreen>
                 children: <Widget>[
                   _buildOverviewTab(),
                   _buildHealthTab(),
+                  _buildAppUsageTab(),
                   _buildHistoryTab(),
                   _buildLogsTab(),
                 ],
@@ -566,6 +585,148 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAppUsageTab() {
+    final ThemeData theme = Theme.of(context);
+    final List<AppBatteryUsage> usableEntries = _appUsage
+        .where((AppBatteryUsage entry) => entry.totalMah > 0.05)
+        .toList(growable: false);
+    final double totalAttributedMah = usableEntries.fold<double>(
+      0,
+      (double total, AppBatteryUsage entry) => total + entry.totalMah,
+    );
+
+    return RefreshIndicator(
+      onRefresh: _startMonitoring,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+        children: <Widget>[
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    'Estimated app battery usage',
+                    style: theme.textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 8),
+                  _kvRow(
+                    'Attributed discharge',
+                    '${totalAttributedMah.toStringAsFixed(1)} mAh',
+                  ),
+                  _kvRow('Tracked apps', '${usableEntries.length}'),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Values are estimated from discharge current and foreground app activity. Background/System includes non-foreground usage.',
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (!_hasUsageAccess) ...<Widget>[
+            const SizedBox(height: 14),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      'Usage Access required',
+                      style: theme.textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Grant Usage Access to detect the current foreground app and improve per-app attribution.',
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed: _openUsageAccessSettings,
+                      icon: const Icon(Icons.open_in_new),
+                      label: const Text('Open Usage Access settings'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          if (usableEntries.isEmpty) ...<Widget>[
+            const SizedBox(height: 14),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  'No app-level discharge data yet. Use the phone normally while discharging to build estimates.',
+                  style: theme.textTheme.bodyMedium,
+                ),
+              ),
+            ),
+          ] else ...<Widget>[
+            const SizedBox(height: 14),
+            ...usableEntries.take(30).map((AppBatteryUsage entry) {
+              final bool isBackgroundBucket =
+                  entry.packageName == '__background__';
+              final double share = totalAttributedMah <= 0
+                  ? 0
+                  : (entry.totalMah / totalAttributedMah) * 100;
+
+              return Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Row(
+                        children: <Widget>[
+                          Icon(
+                            isBackgroundBucket
+                                ? Icons.layers_outlined
+                                : Icons.apps_outlined,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              entry.appName,
+                              style: theme.textTheme.titleMedium,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Text(
+                            '${entry.totalMah.toStringAsFixed(1)} mAh',
+                            style: theme.textTheme.titleSmall,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        entry.packageName,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 8),
+                      _kvRow(
+                        'Foreground',
+                        '${entry.foregroundMah.toStringAsFixed(1)} mAh',
+                      ),
+                      _kvRow(
+                        'Background',
+                        '${entry.backgroundMah.toStringAsFixed(1)} mAh',
+                      ),
+                      _kvRow('Share', '${share.toStringAsFixed(1)}%'),
+                    ],
+                  ),
+                ),
+              );
+            }),
+          ],
         ],
       ),
     );
