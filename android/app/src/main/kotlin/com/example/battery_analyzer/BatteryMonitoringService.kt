@@ -1,5 +1,6 @@
 package com.example.battery_analyzer
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -26,6 +27,7 @@ class BatteryMonitoringService : Service() {
     private var batteryReceiver: BroadcastReceiver? = null
     private lateinit var notificationManager: NotificationManager
     private lateinit var batteryManager: BatteryManager
+    private var explicitlyStopped = false
 
     private val updater = object : Runnable {
         override fun run() {
@@ -64,11 +66,14 @@ class BatteryMonitoringService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == actionStop) {
+            explicitlyStopped = true
             setMonitoringEnabled(this, false)
             stopForegroundCompat()
             stopSelf()
             return START_NOT_STICKY
         }
+
+        explicitlyStopped = false
 
         val initialNotification = createNotification(
             batteryPercent = 0,
@@ -92,7 +97,17 @@ class BatteryMonitoringService : Service() {
         mainHandler.removeCallbacks(updater)
         unregisterBatteryReceiver()
         isRunning = false
+        if (!explicitlyStopped && shouldStartOnBoot(this)) {
+            scheduleRestart()
+        }
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (shouldStartOnBoot(this)) {
+            scheduleRestart()
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -238,6 +253,32 @@ class BatteryMonitoringService : Service() {
         } else {
             @Suppress("DEPRECATION")
             stopForeground(true)
+        }
+    }
+
+    private fun scheduleRestart() {
+        val restartIntent = Intent(applicationContext, BatteryMonitoringService::class.java)
+        val restartPendingIntent = PendingIntent.getService(
+            applicationContext,
+            1403,
+            restartIntent,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val triggerAtMs = System.currentTimeMillis() + 1500L
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                triggerAtMs,
+                restartPendingIntent
+            )
+        } else {
+            alarmManager.set(
+                AlarmManager.RTC_WAKEUP,
+                triggerAtMs,
+                restartPendingIntent
+            )
         }
     }
 }
