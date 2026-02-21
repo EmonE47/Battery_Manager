@@ -566,36 +566,6 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
-          const SizedBox(height: 14),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text('AccuBattery-style estimates',
-                      style: theme.textTheme.titleLarge),
-                  const SizedBox(height: 12),
-                  _kvRow('Predicted time to full',
-                      _formatHours(_batteryData.projectedTimeToFullHours)),
-                  _kvRow('Predicted time to empty',
-                      _formatHours(_batteryData.projectedTimeToEmptyHours)),
-                  _kvRow(
-                    'Charge throughput',
-                    '${_batteryData.chargedSinceStart.toStringAsFixed(1)} mAh',
-                  ),
-                  _kvRow(
-                    'Discharge throughput',
-                    '${_batteryData.dischargedSinceStart.toStringAsFixed(1)} mAh',
-                  ),
-                  _kvRow(
-                    'Equivalent cycles',
-                    _batteryData.cycleCount.toString(),
-                  ),
-                ],
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -717,16 +687,6 @@ class _HomeScreenState extends State<HomeScreen>
       return '${hours}h ${minutes}m';
     }
     return '${duration.inMinutes}m';
-  }
-
-  String _formatHours(double hours) {
-    if (hours <= 0 || hours.isNaN || hours.isInfinite) {
-      return 'N/A';
-    }
-    final int totalMinutes = (hours * 60).round();
-    final int h = totalMinutes ~/ 60;
-    final int m = totalMinutes % 60;
-    return '${h}h ${m}m';
   }
 
   String _healthAdvice(BatteryData data) {

@@ -35,6 +35,8 @@ class RealBatteryService {
   final int _maxLogs = 150;
   final int _maxCapacitySamples = 120;
   final int _highConfidenceSampleTarget = 80;
+  final int _minSessionSocDeltaPercent = 4;
+  final double _minSessionThroughputMah = 30;
 
   final List<BatteryHistory> _history = <BatteryHistory>[];
   final List<String> _logs = <String>[];
@@ -323,7 +325,7 @@ class RealBatteryService {
       chargeCounterMah,
       elapsedSeconds,
     );
-    _updateCycleCount(throughputMah, designCapacityMah);
+    _updateCycleCount(throughputMah, designCapacityMah, isCharging);
 
     final double measuredCapacityMah = _smoothedCapacityMah <= 0
         ? designCapacityMah.toDouble()
@@ -651,13 +653,13 @@ class RealBatteryService {
     }
 
     final int deltaPercent = (currentLevel - _sessionStartLevel!).abs();
-    if (deltaPercent < 2) {
+    if (deltaPercent < _minSessionSocDeltaPercent) {
       return;
     }
 
     final double throughputMah =
         _sessionCharging! ? _sessionChargedMah : _sessionDischargedMah;
-    if (throughputMah < 15) {
+    if (throughputMah < _minSessionThroughputMah) {
       return;
     }
 
@@ -759,11 +761,17 @@ class RealBatteryService {
         .toDouble();
   }
 
-  void _updateCycleCount(double throughputMah, int designCapacityMah) {
-    if (throughputMah <= 0 || designCapacityMah <= 0) {
+  void _updateCycleCount(
+    double throughputMah,
+    int designCapacityMah,
+    bool isCharging,
+  ) {
+    if (throughputMah <= 0 || designCapacityMah <= 0 || isCharging) {
       return;
     }
 
+    // Discharge-equivalent counting:
+    // one full discharged design-capacity worth of throughput == one cycle.
     _throughputMahForCycle += throughputMah;
     while (_throughputMahForCycle >= designCapacityMah) {
       _cycleCount += 1;
