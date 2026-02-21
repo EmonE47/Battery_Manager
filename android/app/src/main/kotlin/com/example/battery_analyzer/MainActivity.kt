@@ -2,6 +2,9 @@ package com.example.battery_analyzer
 
 import android.Manifest
 import android.app.ActivityManager
+import android.app.AppOpsManager
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -10,6 +13,8 @@ import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -23,9 +28,17 @@ class MainActivity : FlutterActivity() {
     private val channelName = "com.example.battery_analyzer/battery"
     private val eventChannelName = "com.example.battery_analyzer/battery_events"
     private val notificationPermissionRequestCode = 1001
+    private val foregroundRefreshIntervalMs = 2500L
 
     private var eventSink: EventChannel.EventSink? = null
     private var batteryReceiver: BroadcastReceiver? = null
+    private var lastForegroundRefreshAtMs = 0L
+    private var cachedForegroundApp: ForegroundAppInfo? = null
+
+    private data class ForegroundAppInfo(
+        val packageName: String,
+        val appName: String,
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,6 +57,8 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
                 when (call.method) {
                     "requestPermissions" -> handlePermissionRequest(result)
+                    "hasUsageAccess" -> result.success(hasUsageStatsPermission())
+                    "openUsageAccessSettings" -> openUsageAccessSettings(result)
                     "getBatteryInfo" -> result.success(getBatteryInfo())
                     "startBackgroundService" -> startBackgroundService(result)
                     "stopBackgroundService" -> stopBackgroundService(result)
@@ -172,6 +187,11 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        getForegroundAppInfo()?.let { foregroundInfo ->
+            data["foregroundPackage"] = foregroundInfo.packageName
+            data["foregroundApp"] = foregroundInfo.appName
+        }
+
         return data
     }
 
@@ -274,5 +294,96 @@ class MainActivity : FlutterActivity() {
         } catch (error: Exception) {
             Log.w("BatteryAnalyzer", "Could not set high refresh mode", error)
         }
+    }
+
+    private fun hasUsageStatsPermission(): Boolean {
+        val appOpsManager = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOpsManager.unsafeCheckOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                Process.myUid(),
+                packageName
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            appOpsManager.checkOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                Process.myUid(),
+                packageName
+            )
+        }
+
+        if (mode == AppOpsManager.MODE_DEFAULT) {
+            return checkCallingOrSelfPermission(Manifest.permission.PACKAGE_USAGE_STATS) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun openUsageAccessSettings(result: MethodChannel.Result) {
+        try {
+            val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            startActivity(intent)
+            result.success(true)
+        } catch (error: Exception) {
+            result.error("USAGE_SETTINGS_ERROR", error.message, null)
+        }
+    }
+
+    private fun getForegroundAppInfo(): ForegroundAppInfo? {
+        if (!hasUsageStatsPermission()) {
+            return null
+        }
+
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastForegroundRefreshAtMs < foregroundRefreshIntervalMs) {
+            return cachedForegroundApp
+        }
+
+        val usageStatsManager =
+            getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val events = usageStatsManager.queryEvents(nowMs - 5 * 60 * 1000L, nowMs)
+        val event = UsageEvents.Event()
+
+        var latestPackage: String? = null
+        var latestTimestamp = 0L
+
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            if (!isForegroundEvent(event.eventType) || event.packageName.isNullOrBlank()) {
+                continue
+            }
+            if (event.timeStamp >= latestTimestamp) {
+                latestTimestamp = event.timeStamp
+                latestPackage = event.packageName
+            }
+        }
+
+        lastForegroundRefreshAtMs = nowMs
+        if (latestPackage == null) {
+            cachedForegroundApp = null
+            return null
+        }
+
+        val appName = try {
+            val appInfo = packageManager.getApplicationInfo(latestPackage, 0)
+            packageManager.getApplicationLabel(appInfo).toString()
+        } catch (_: PackageManager.NameNotFoundException) {
+            latestPackage
+        }
+
+        cachedForegroundApp = ForegroundAppInfo(
+            packageName = latestPackage,
+            appName = appName
+        )
+        return cachedForegroundApp
+    }
+
+    private fun isForegroundEvent(eventType: Int): Boolean {
+        return eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                eventType == UsageEvents.Event.ACTIVITY_RESUMED)
     }
 }
