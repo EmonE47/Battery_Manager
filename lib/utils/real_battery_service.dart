@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/app_battery_usage.dart';
 import '../models/battery_data.dart';
 import '../models/battery_history.dart';
 
@@ -18,6 +19,9 @@ class RealBatteryService {
   static const String _capacitySampleCountKey = 'capacity_sample_count_v2';
   static const String _cycleCountKey = 'cycle_count_v1';
   static const String _cycleThroughputKey = 'cycle_throughput_mah_v1';
+  static const String _usageAccessHintShownKey = 'usage_access_hint_shown_v1';
+  static const String _backgroundBucketPackage = '__background__';
+  static const String _backgroundBucketApp = 'Background/System';
 
   final StreamController<BatteryData> _batteryDataController =
       StreamController<BatteryData>.broadcast();
@@ -25,10 +29,16 @@ class RealBatteryService {
       StreamController<List<BatteryHistory>>.broadcast();
   final StreamController<List<String>> _logController =
       StreamController<List<String>>.broadcast();
+  final StreamController<List<AppBatteryUsage>> _appUsageController =
+      StreamController<List<AppBatteryUsage>>.broadcast();
+  final StreamController<bool> _usageAccessController =
+      StreamController<bool>.broadcast();
 
   Stream<BatteryData> get batteryDataStream => _batteryDataController.stream;
   Stream<List<BatteryHistory>> get historyStream => _historyController.stream;
   Stream<List<String>> get logStream => _logController.stream;
+  Stream<List<AppBatteryUsage>> get appUsageStream => _appUsageController.stream;
+  Stream<bool> get usageAccessStream => _usageAccessController.stream;
 
   final Duration _updateInterval = const Duration(seconds: 1);
   final int _maxHistory = 360;
@@ -41,6 +51,8 @@ class RealBatteryService {
   final List<BatteryHistory> _history = <BatteryHistory>[];
   final List<String> _logs = <String>[];
   final List<double> _capacitySamples = <double>[];
+  final Map<String, AppBatteryUsage> _appUsageByPackage =
+      <String, AppBatteryUsage>{};
 
   StreamSubscription<dynamic>? _eventSubscription;
   Timer? _monitoringTimer;
@@ -78,12 +90,15 @@ class RealBatteryService {
   double _highVoltageExposureScore = 0;
   double _highCRateExposureScore = 0;
   double _smoothedHealthPercentage = 100;
+  final double _foregroundAttributionShare = 0.82;
 
   String _manufacturer = 'Unknown';
   String _brand = 'Unknown';
   String _model = 'Unknown';
   String _device = 'Unknown';
   bool _loggedDeviceInfo = false;
+  bool _hasUsageAccess = false;
+  bool _usageAccessHintShown = false;
 
   int get _activeDesignCapacityMah =>
       _manualDesignCapacityMah ?? _detectedDesignCapacityMah;
@@ -138,6 +153,7 @@ class RealBatteryService {
 
       final int savedCycleCount = prefs.getInt(_cycleCountKey) ?? 0;
       final double savedThroughput = prefs.getDouble(_cycleThroughputKey) ?? 0;
+      _usageAccessHintShown = prefs.getBool(_usageAccessHintShownKey) ?? false;
 
       _cycleCount = savedCycleCount < 0 ? 0 : savedCycleCount;
       _throughputMahForCycle = savedThroughput < 0 ? 0 : savedThroughput;
@@ -186,6 +202,37 @@ class RealBatteryService {
     }
   }
 
+  Future<void> openUsageAccessSettings() async {
+    try {
+      await _platform.invokeMethod<bool>('openUsageAccessSettings');
+      _addLog('Opened Usage Access settings. Allow access for app-level estimates.');
+    } catch (error) {
+      _addLog('Could not open Usage Access settings: $error');
+    }
+  }
+
+  Future<void> _refreshUsageAccessStatus() async {
+    try {
+      final bool granted =
+          await _platform.invokeMethod<bool>('hasUsageAccess') ?? false;
+      if (granted != _hasUsageAccess) {
+        _hasUsageAccess = granted;
+        _usageAccessController.add(granted);
+      }
+
+      if (!granted && !_usageAccessHintShown) {
+        _usageAccessHintShown = true;
+        _addLog(
+          'Usage Access is off. Per-app battery attribution needs Usage Access permission.',
+        );
+        final SharedPreferences prefs =
+            _prefs ?? await SharedPreferences.getInstance();
+        _prefs = prefs;
+        await prefs.setBool(_usageAccessHintShownKey, true);
+      }
+    } catch (_) {}
+  }
+
   void _initializeData() {
     _addLog('Battery Analyzer initialized');
     _addLog('Collecting samples for precision calibration');
@@ -194,6 +241,8 @@ class RealBatteryService {
     _batteryDataController.add(initialData);
     _historyController.add(const <BatteryHistory>[]);
     _logController.add(List<String>.from(_logs));
+    _appUsageController.add(const <AppBatteryUsage>[]);
+    _usageAccessController.add(false);
   }
 
   Future<void> startMonitoring() async {
@@ -206,6 +255,7 @@ class RealBatteryService {
 
     try {
       _addLog('Starting battery monitoring');
+      await _refreshUsageAccessStatus();
 
       final bool permissionGranted =
           await _platform.invokeMethod<bool>('requestPermissions') ?? false;
@@ -295,6 +345,13 @@ class RealBatteryService {
     _brand = _cleanString(data['brand']);
     _model = _cleanString(data['model']);
     _device = _cleanString(data['device']);
+    final String foregroundPackage = _cleanString(data['foregroundPackage']);
+    final String foregroundApp = _cleanString(data['foregroundApp']);
+
+    if (foregroundPackage != 'Unknown' && !_hasUsageAccess) {
+      _hasUsageAccess = true;
+      _usageAccessController.add(true);
+    }
 
     if (!_loggedDeviceInfo && _model != 'Unknown') {
       _addLog('Device detected: $_manufacturer $_model ($_device)');
@@ -324,6 +381,12 @@ class RealBatteryService {
       levelPercent,
       chargeCounterMah,
       elapsedSeconds,
+    );
+    _updateAppUsageAttribution(
+      throughputMah,
+      isCharging,
+      foregroundPackage,
+      foregroundApp,
     );
     _updateCycleCount(throughputMah, designCapacityMah, isCharging);
 
@@ -781,6 +844,88 @@ class RealBatteryService {
     _persistCycleState();
   }
 
+  void _updateAppUsageAttribution(
+    double throughputMah,
+    bool isCharging,
+    String foregroundPackage,
+    String foregroundApp,
+  ) {
+    if (isCharging || throughputMah <= 0) {
+      return;
+    }
+
+    final DateTime now = DateTime.now();
+    final bool hasForegroundApp = foregroundPackage != 'Unknown';
+
+    if (hasForegroundApp) {
+      final double foregroundShareMah =
+          throughputMah * _foregroundAttributionShare;
+      final double backgroundShareMah = throughputMah - foregroundShareMah;
+
+      _mergeAppUsage(
+        packageName: foregroundPackage,
+        appName: foregroundApp == 'Unknown' ? foregroundPackage : foregroundApp,
+        foregroundDeltaMah: foregroundShareMah,
+        backgroundDeltaMah: 0,
+        timestamp: now,
+      );
+
+      if (backgroundShareMah > 0) {
+        _mergeAppUsage(
+          packageName: _backgroundBucketPackage,
+          appName: _backgroundBucketApp,
+          foregroundDeltaMah: 0,
+          backgroundDeltaMah: backgroundShareMah,
+          timestamp: now,
+        );
+      }
+    } else {
+      _mergeAppUsage(
+        packageName: _backgroundBucketPackage,
+        appName: _backgroundBucketApp,
+        foregroundDeltaMah: 0,
+        backgroundDeltaMah: throughputMah,
+        timestamp: now,
+      );
+    }
+
+    _emitAppUsage();
+  }
+
+  void _mergeAppUsage({
+    required String packageName,
+    required String appName,
+    required double foregroundDeltaMah,
+    required double backgroundDeltaMah,
+    required DateTime timestamp,
+  }) {
+    final AppBatteryUsage? existing = _appUsageByPackage[packageName];
+    if (existing == null) {
+      _appUsageByPackage[packageName] = AppBatteryUsage(
+        packageName: packageName,
+        appName: appName,
+        foregroundMah: max(0, foregroundDeltaMah),
+        backgroundMah: max(0, backgroundDeltaMah),
+        lastUpdated: timestamp,
+      );
+      return;
+    }
+
+    _appUsageByPackage[packageName] = existing.copyWith(
+      appName: appName,
+      foregroundMah: (existing.foregroundMah + foregroundDeltaMah).clamp(0, 1e12),
+      backgroundMah: (existing.backgroundMah + backgroundDeltaMah).clamp(0, 1e12),
+      lastUpdated: timestamp,
+    );
+  }
+
+  void _emitAppUsage() {
+    final List<AppBatteryUsage> sorted = _appUsageByPackage.values.toList()
+      ..sort((AppBatteryUsage a, AppBatteryUsage b) =>
+          b.totalMah.compareTo(a.totalMah));
+    _appUsageController.add(sorted);
+  }
+
   void _updateSignalAverages(
     double temperatureC,
     double voltageV,
@@ -980,6 +1125,8 @@ class RealBatteryService {
   void clearData() {
     _history.clear();
     _historyController.add(const <BatteryHistory>[]);
+    _appUsageByPackage.clear();
+    _appUsageController.add(const <AppBatteryUsage>[]);
 
     _logs.clear();
     _addLog('History and samples cleared (cycle count preserved)');
@@ -1035,5 +1182,7 @@ class RealBatteryService {
     _batteryDataController.close();
     _historyController.close();
     _logController.close();
+    _appUsageController.close();
+    _usageAccessController.close();
   }
 }
