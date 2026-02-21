@@ -45,8 +45,8 @@ class RealBatteryService {
   final int _maxLogs = 150;
   final int _maxCapacitySamples = 120;
   final int _highConfidenceSampleTarget = 80;
-  final int _minSessionSocDeltaPercent = 4;
-  final double _minSessionThroughputMah = 30;
+  final int _minSessionSocDeltaPercent = 2;
+  final double _minSessionThroughputMah = 15;
 
   final List<BatteryHistory> _history = <BatteryHistory>[];
   final List<String> _logs = <String>[];
@@ -712,6 +712,11 @@ class RealBatteryService {
 
   void _commitSessionEstimate(int currentLevel) {
     if (_sessionStartLevel == null || _sessionCharging == null) {
+      return;
+    }
+
+    // Capacity calibration is based only on charging sessions.
+    if (_sessionCharging != true) {
       return;
     }
 
