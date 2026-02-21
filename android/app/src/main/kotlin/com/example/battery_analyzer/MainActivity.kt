@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -25,6 +26,16 @@ class MainActivity : FlutterActivity() {
 
     private var eventSink: EventChannel.EventSink? = null
     private var batteryReceiver: BroadcastReceiver? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        requestHighestRefreshRate()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        requestHighestRefreshRate()
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -239,5 +250,29 @@ class MainActivity : FlutterActivity() {
         }
 
         return BatteryMonitoringService.shouldStartOnBoot(this)
+    }
+
+    private fun requestHighestRefreshRate() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return
+        }
+
+        try {
+            @Suppress("DEPRECATION")
+            val supportedModes = windowManager.defaultDisplay.supportedModes
+            val highestMode = supportedModes.maxByOrNull { mode -> mode.refreshRate } ?: return
+
+            val params = window.attributes
+            if (params.preferredDisplayModeId != highestMode.modeId) {
+                params.preferredDisplayModeId = highestMode.modeId
+                window.attributes = params
+                Log.d(
+                    "BatteryAnalyzer",
+                    "Requested high refresh mode: ${highestMode.refreshRate}Hz"
+                )
+            }
+        } catch (error: Exception) {
+            Log.w("BatteryAnalyzer", "Could not set high refresh mode", error)
+        }
     }
 }
