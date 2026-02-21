@@ -30,6 +30,8 @@ class BatteryData {
   final String device;
   final bool isDesignCapacityManual;
   final int? manualDesignCapacity;
+  final int capacitySampleCount;
+  final double confidencePercentage;
 
   const BatteryData({
     required this.level,
@@ -63,6 +65,8 @@ class BatteryData {
     this.device = 'Unknown',
     this.isDesignCapacityManual = false,
     this.manualDesignCapacity,
+    this.capacitySampleCount = 0,
+    this.confidencePercentage = 0,
   });
 
   factory BatteryData.empty() {
@@ -82,6 +86,8 @@ class BatteryData {
       actualCapacity: 0,
       designCapacity: 0,
       manualDesignCapacity: null,
+      capacitySampleCount: 0,
+      confidencePercentage: 0,
     );
   }
 
@@ -117,6 +123,8 @@ class BatteryData {
     String? device,
     bool? isDesignCapacityManual,
     int? manualDesignCapacity,
+    int? capacitySampleCount,
+    double? confidencePercentage,
   }) {
     return BatteryData(
       level: level ?? this.level,
@@ -153,6 +161,8 @@ class BatteryData {
       isDesignCapacityManual:
           isDesignCapacityManual ?? this.isDesignCapacityManual,
       manualDesignCapacity: manualDesignCapacity ?? this.manualDesignCapacity,
+      capacitySampleCount: capacitySampleCount ?? this.capacitySampleCount,
+      confidencePercentage: confidencePercentage ?? this.confidencePercentage,
     );
   }
 }

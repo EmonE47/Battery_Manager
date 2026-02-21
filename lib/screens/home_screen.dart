@@ -477,6 +477,14 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                   const SizedBox(height: 12),
                   _kvRow('Health score', '${health.toStringAsFixed(1)}%'),
+                  _kvRow(
+                    'Confidence',
+                    '${_batteryData.confidencePercentage.toStringAsFixed(0)}%',
+                  ),
+                  _kvRow(
+                    'Valid sessions',
+                    _batteryData.capacitySampleCount.toString(),
+                  ),
                   _kvRow('Device',
                       '${_batteryData.manufacturer} ${_batteryData.model}'),
                   _kvRow('Board', _batteryData.device),
@@ -722,6 +730,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String _healthAdvice(BatteryData data) {
+    if (data.confidencePercentage < 45) {
+      return 'Still calibrating. Use more charge and discharge sessions for a more reliable health estimate.';
+    }
     final double stress = data.stressScore;
     if (stress > 65) {
       return 'High stress detected. Reduce heat and avoid sustained heavy load while charging.';
