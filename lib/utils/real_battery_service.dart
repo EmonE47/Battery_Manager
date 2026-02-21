@@ -15,6 +15,9 @@ class RealBatteryService {
 
   static const String _manualCapacityKey = 'manual_design_capacity_mah';
   static const String _capacitySamplesKey = 'capacity_samples_mah_v1';
+  static const String _cycleCountKey = 'cycle_count_v1';
+  static const String _cycleThroughputKey = 'cycle_throughput_mah_v1';
+  static const String _lockedHealthKey = 'locked_health_percentage_v1';
 
   final StreamController<BatteryData> _batteryDataController =
       StreamController<BatteryData>.broadcast();
@@ -30,7 +33,7 @@ class RealBatteryService {
   final Duration _updateInterval = const Duration(seconds: 1);
   final int _maxHistory = 360;
   final int _maxLogs = 150;
-  final int _maxCapacitySamples = 40;
+  final int _maxCapacitySamples = 20;
 
   final List<BatteryHistory> _history = <BatteryHistory>[];
   final List<String> _logs = <String>[];
@@ -54,6 +57,8 @@ class RealBatteryService {
   double _smoothedCapacityMah = 4000;
   int _cycleCount = 0;
   double _throughputMahForCycle = 0;
+  bool _healthLocked = false;
+  double? _lockedHealthPercentage;
 
   double _chargedSinceStartMah = 0;
   double _dischargedSinceStartMah = 0;
@@ -115,6 +120,32 @@ class RealBatteryService {
       } else {
         _recomputeSmoothedCapacity();
         _addLog('Loaded ${_capacitySamples.length} saved capacity samples');
+      }
+
+      final int savedCycleCount = prefs.getInt(_cycleCountKey) ?? 0;
+      final double savedThroughput = prefs.getDouble(_cycleThroughputKey) ?? 0;
+      final double? savedLockedHealth = prefs.getDouble(_lockedHealthKey);
+
+      _cycleCount = savedCycleCount < 0 ? 0 : savedCycleCount;
+      _throughputMahForCycle = savedThroughput < 0 ? 0 : savedThroughput;
+      if (savedLockedHealth != null &&
+          savedLockedHealth >= 0 &&
+          savedLockedHealth <= 100 &&
+          _capacitySamples.length >= _maxCapacitySamples) {
+        _healthLocked = true;
+        _lockedHealthPercentage = savedLockedHealth;
+      }
+
+      if (_cycleCount > 0 || _throughputMahForCycle > 0) {
+        _addLog(
+          'Loaded cycle state: $_cycleCount cycles, ${_throughputMahForCycle.toStringAsFixed(1)} mAh',
+        );
+      }
+      if (_healthLocked && _lockedHealthPercentage != null) {
+        _smoothedHealthPercentage = _lockedHealthPercentage!;
+        _addLog(
+          'Health calibration locked at ${_lockedHealthPercentage!.toStringAsFixed(1)}% after $_maxCapacitySamples samples',
+        );
       }
     } catch (error) {
       _addLog('Could not load preferences: $error');
@@ -639,6 +670,10 @@ class RealBatteryService {
   }
 
   void _pushCapacitySample(double estimateMah) {
+    if (_healthLocked) {
+      return;
+    }
+
     final int effectiveDesignMah = _activeDesignCapacityMah;
     final double minEstimate = max(650, effectiveDesignMah * 0.45);
     final double maxEstimate = effectiveDesignMah * 1.7;
@@ -654,6 +689,12 @@ class RealBatteryService {
 
     _recomputeSmoothedCapacity();
     _persistCapacitySamples();
+
+    if (_capacitySamples.length >= _maxCapacitySamples && !_healthLocked) {
+      _addLog(
+        'Collected $_maxCapacitySamples samples. Finalizing stable health score.',
+      );
+    }
   }
 
   void _recomputeSmoothedCapacity() {
@@ -698,6 +739,7 @@ class RealBatteryService {
       _throughputMahForCycle -= designCapacityMah;
       _addLog('Cycle count increased to $_cycleCount');
     }
+    _persistCycleState();
   }
 
   void _updateSignalAverages(
@@ -763,6 +805,10 @@ class RealBatteryService {
     int designCapacityMah,
     double stressScore,
   ) {
+    if (_healthLocked && _lockedHealthPercentage != null) {
+      return _lockedHealthPercentage!;
+    }
+
     final double capacityHealth = designCapacityMah <= 0
         ? 0
         : (measuredCapacityMah / designCapacityMah) * 100.0;
@@ -793,7 +839,19 @@ class RealBatteryService {
         stressPenalty;
 
     _smoothedHealthPercentage += (rawHealth - _smoothedHealthPercentage) * 0.12;
-    return _smoothedHealthPercentage.clamp(0, 100).toDouble();
+    final double computedHealth =
+        _smoothedHealthPercentage.clamp(0, 100).toDouble();
+
+    if (!_healthLocked && _capacitySamples.length >= _maxCapacitySamples) {
+      _healthLocked = true;
+      _lockedHealthPercentage = computedHealth;
+      _persistLockedHealth();
+      _addLog(
+        'Health calibration complete: ${computedHealth.toStringAsFixed(1)}% (stable)',
+      );
+    }
+
+    return computedHealth;
   }
 
   String _getHealthString(int status, double healthPercentage) {
@@ -912,7 +970,7 @@ class RealBatteryService {
     _historyController.add(const <BatteryHistory>[]);
 
     _logs.clear();
-    _addLog('History and counters cleared');
+    _addLog('History and samples cleared (cycle count preserved)');
 
     _lastSampleTime = null;
     _phaseStartTime = null;
@@ -922,8 +980,8 @@ class RealBatteryService {
 
     _smoothedCapacityMah = _activeDesignCapacityMah.toDouble();
     _capacitySamples.clear();
-    _cycleCount = 0;
-    _throughputMahForCycle = 0;
+    _healthLocked = false;
+    _lockedHealthPercentage = null;
     _chargedSinceStartMah = 0;
     _dischargedSinceStartMah = 0;
 
@@ -946,6 +1004,31 @@ class RealBatteryService {
           _prefs ?? await SharedPreferences.getInstance();
       _prefs = prefs;
       await prefs.remove(_capacitySamplesKey);
+      await prefs.remove(_lockedHealthKey);
+    }).catchError((_) {});
+  }
+
+  void _persistCycleState() {
+    Future<void>(() async {
+      final SharedPreferences prefs =
+          _prefs ?? await SharedPreferences.getInstance();
+      _prefs = prefs;
+      await prefs.setInt(_cycleCountKey, _cycleCount);
+      await prefs.setDouble(_cycleThroughputKey, _throughputMahForCycle);
+    }).catchError((_) {});
+  }
+
+  void _persistLockedHealth() {
+    final double? health = _lockedHealthPercentage;
+    if (health == null) {
+      return;
+    }
+
+    Future<void>(() async {
+      final SharedPreferences prefs =
+          _prefs ?? await SharedPreferences.getInstance();
+      _prefs = prefs;
+      await prefs.setDouble(_lockedHealthKey, health);
     }).catchError((_) {});
   }
 

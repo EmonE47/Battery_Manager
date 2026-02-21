@@ -1,6 +1,7 @@
 package com.example.battery_analyzer
 
 import android.Manifest
+import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -36,7 +37,7 @@ class MainActivity : FlutterActivity() {
                     "startBackgroundService" -> startBackgroundService(result)
                     "stopBackgroundService" -> stopBackgroundService(result)
                     "isBackgroundServiceRunning" -> {
-                        result.success(BatteryMonitoringService.isMonitoring())
+                        result.success(isBackgroundServiceRunning())
                     }
                     else -> result.notImplemented()
                 }
@@ -220,5 +221,23 @@ class MainActivity : FlutterActivity() {
         } catch (error: Exception) {
             result.error("SERVICE_STOP_ERROR", error.message, null)
         }
+    }
+
+    private fun isBackgroundServiceRunning(): Boolean {
+        if (BatteryMonitoringService.isMonitoring()) {
+            return true
+        }
+
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        @Suppress("DEPRECATION")
+        val running = activityManager.getRunningServices(Int.MAX_VALUE).any { serviceInfo ->
+            serviceInfo.service.className == BatteryMonitoringService::class.java.name
+        }
+
+        if (running) {
+            return true
+        }
+
+        return BatteryMonitoringService.shouldStartOnBoot(this)
     }
 }
