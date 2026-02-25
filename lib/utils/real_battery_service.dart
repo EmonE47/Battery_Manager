@@ -45,8 +45,18 @@ class RealBatteryService {
   final int _maxLogs = 150;
   final int _maxCapacitySamples = 120;
   final int _highConfidenceSampleTarget = 80;
-  final int _minSessionSocDeltaPercent = 2;
-  final double _minSessionThroughputMah = 15;
+  final int _minSessionSocDeltaPercent = 5;
+  final double _minSessionThroughputMah = 100;
+  final int _fallbackSessionSocDeltaPercent = 8;
+  final double _fallbackSessionThroughputMah = 180;
+  final int _maxSamplingSocPercent = 85;
+  final double _minSamplingTemperatureC = 15.0;
+  final double _maxSamplingTemperatureC = 42.0;
+  final double _maxSessionCurrentCoefficientOfVariation = 0.35;
+  final double _minChargeCounterCoverage = 0.60;
+  final int _minimumSamplesForOutlierFilter = 8;
+  final double _maxSampleDeviationFromMedian = 0.18;
+  final double _healthTrustConfidenceFloor = 0.45;
 
   final List<BatteryHistory> _history = <BatteryHistory>[];
   final List<String> _logs = <String>[];
@@ -82,6 +92,11 @@ class RealBatteryService {
   double _sessionChargedMah = 0;
   double _sessionDischargedMah = 0;
   double? _lastChargeCounterMah;
+  int _sessionCurrentSamples = 0;
+  double _sessionCurrentAbsSumMa = 0;
+  double _sessionCurrentAbsSquaredSumMa = 0;
+  int _sessionCounterSamples = 0;
+  int _sessionFallbackSamples = 0;
 
   double _ewmaTemperatureC = 25;
   double _ewmaVoltageV = 3.85;
@@ -381,6 +396,8 @@ class RealBatteryService {
       levelPercent,
       chargeCounterMah,
       elapsedSeconds,
+      currentMa,
+      temperatureC,
     );
     _updateAppUsageAttribution(
       throughputMah,
@@ -615,6 +632,8 @@ class RealBatteryService {
     int levelPercent,
     double? chargeCounterMah,
     double elapsedSeconds,
+    int currentMa,
+    double temperatureC,
   ) {
     final double? counterDeltaMah =
         _consumeChargeCounterDelta(chargeCounterMah, elapsedSeconds);
@@ -631,6 +650,7 @@ class RealBatteryService {
       _chargedSinceStartMah += signedDeltaMah;
       if (_sessionCharging == true) {
         _sessionChargedMah += signedDeltaMah;
+        _trackSessionQuality(currentMa, counterMatchesDirection);
       }
     } else if (signedDeltaMah < 0) {
       final double discharge = signedDeltaMah.abs();
@@ -643,19 +663,21 @@ class RealBatteryService {
     if (_sessionCharging == null || _sessionStartLevel == null) {
       _sessionCharging = isCharging;
       _sessionStartLevel = levelPercent;
+      _resetSessionTracking();
       return throughputMah;
     }
 
     if (_sessionCharging != isCharging) {
-      _commitSessionEstimate(levelPercent);
+      _commitSessionEstimate(levelPercent, temperatureC);
       _sessionCharging = isCharging;
       _sessionStartLevel = levelPercent;
       _sessionChargedMah = 0;
       _sessionDischargedMah = 0;
+      _resetSessionTracking();
       return throughputMah;
     }
 
-    _commitSessionEstimate(levelPercent);
+    _commitSessionEstimate(levelPercent, temperatureC);
     return throughputMah;
   }
 
@@ -703,20 +725,72 @@ class RealBatteryService {
       (_activeDesignCapacityMah * 6.0) * (normalizedSeconds / 3600.0),
     );
 
-    if (deltaMah.abs() > maxReasonableDelta) {
+      if (deltaMah.abs() > maxReasonableDelta) {
       return null;
     }
 
     return deltaMah;
   }
 
-  void _commitSessionEstimate(int currentLevel) {
+  void _trackSessionQuality(int currentMa, bool usedChargeCounter) {
+    final double currentMagnitude = currentMa.abs().toDouble();
+    if (currentMagnitude <= 0) {
+      return;
+    }
+
+    _sessionCurrentSamples += 1;
+    _sessionCurrentAbsSumMa += currentMagnitude;
+    _sessionCurrentAbsSquaredSumMa += currentMagnitude * currentMagnitude;
+
+    if (usedChargeCounter) {
+      _sessionCounterSamples += 1;
+    } else {
+      _sessionFallbackSamples += 1;
+    }
+  }
+
+  void _resetSessionTracking() {
+    _sessionCurrentSamples = 0;
+    _sessionCurrentAbsSumMa = 0;
+    _sessionCurrentAbsSquaredSumMa = 0;
+    _sessionCounterSamples = 0;
+    _sessionFallbackSamples = 0;
+  }
+
+  bool _isSessionCurrentStable() {
+    if (_sessionCurrentSamples < 4) {
+      return false;
+    }
+
+    final double mean = _sessionCurrentAbsSumMa / _sessionCurrentSamples;
+    if (mean <= 0) {
+      return false;
+    }
+
+    final double meanSquare =
+        _sessionCurrentAbsSquaredSumMa / _sessionCurrentSamples;
+    final double variance = max(0.0, meanSquare - (mean * mean));
+    final double standardDeviation = sqrt(variance);
+    final double coefficientOfVariation = standardDeviation / mean;
+    return coefficientOfVariation <= _maxSessionCurrentCoefficientOfVariation;
+  }
+
+  void _commitSessionEstimate(int currentLevel, double temperatureC) {
     if (_sessionStartLevel == null || _sessionCharging == null) {
       return;
     }
 
     // Capacity calibration is based only on charging sessions.
     if (_sessionCharging != true) {
+      return;
+    }
+
+    if (max(currentLevel, _sessionStartLevel!) > _maxSamplingSocPercent) {
+      return;
+    }
+
+    if (temperatureC < _minSamplingTemperatureC ||
+        temperatureC > _maxSamplingTemperatureC) {
       return;
     }
 
@@ -731,12 +805,28 @@ class RealBatteryService {
       return;
     }
 
+    if (!_isSessionCurrentStable()) {
+      return;
+    }
+
+    final int counterTotal = _sessionCounterSamples + _sessionFallbackSamples;
+    if (_sessionCounterSamples > 0 && counterTotal > 0) {
+      final double counterCoverage = _sessionCounterSamples / counterTotal;
+      if (counterCoverage < _minChargeCounterCoverage) {
+        return;
+      }
+    } else if (deltaPercent < _fallbackSessionSocDeltaPercent ||
+        throughputMah < _fallbackSessionThroughputMah) {
+      return;
+    }
+
     final double estimate = throughputMah * 100.0 / deltaPercent;
     _pushCapacitySample(estimate);
 
     _sessionStartLevel = currentLevel;
     _sessionChargedMah = 0;
     _sessionDischargedMah = 0;
+    _resetSessionTracking();
   }
 
   void _pushCapacitySample(double estimateMah) {
@@ -746,6 +836,16 @@ class RealBatteryService {
 
     if (estimateMah < minEstimate || estimateMah > maxEstimate) {
       return;
+    }
+
+    if (_capacitySamples.length >= _minimumSamplesForOutlierFilter) {
+      final double median = _calculateMedian(_capacitySamples);
+      if (median > 0) {
+        final double deviation = (estimateMah - median).abs() / median;
+        if (deviation > _maxSampleDeviationFromMedian) {
+          return;
+        }
+      }
     }
 
     _capacitySamples.add(estimateMah);
@@ -771,6 +871,12 @@ class RealBatteryService {
       return;
     }
 
+    final List<double> trimmed = _trimmedSamples(_capacitySamples);
+    final List<double> robustSource =
+        trimmed.isEmpty ? _capacitySamples : trimmed;
+    final double robustMean =
+        robustSource.reduce((double a, double b) => a + b) / robustSource.length;
+
     double weightedSum = 0;
     double totalWeight = 0;
     for (int index = 0; index < _capacitySamples.length; index++) {
@@ -779,9 +885,41 @@ class RealBatteryService {
       totalWeight += weight;
     }
 
-    _smoothedCapacityMah = totalWeight == 0
+    final double recencyWeighted = totalWeight == 0
         ? _activeDesignCapacityMah.toDouble()
         : weightedSum / totalWeight;
+    _smoothedCapacityMah = ((robustMean * 0.7) + (recencyWeighted * 0.3))
+        .clamp(min(650.0, _activeDesignCapacityMah * 0.35), 30000.0);
+  }
+
+  List<double> _trimmedSamples(List<double> samples) {
+    if (samples.length < 5) {
+      return List<double>.from(samples);
+    }
+
+    final List<double> sorted = List<double>.from(samples)..sort();
+    int trimCount = (sorted.length * 0.10).floor();
+    trimCount = trimCount.clamp(1, max(1, (sorted.length - 3) ~/ 2));
+    final int start = trimCount;
+    final int end = sorted.length - trimCount;
+
+    if (end - start < 3) {
+      return sorted;
+    }
+    return sorted.sublist(start, end);
+  }
+
+  double _calculateMedian(List<double> values) {
+    if (values.isEmpty) {
+      return 0;
+    }
+
+    final List<double> sorted = List<double>.from(values)..sort();
+    final int mid = sorted.length ~/ 2;
+    if (sorted.length.isOdd) {
+      return sorted[mid];
+    }
+    return (sorted[mid - 1] + sorted[mid]) / 2.0;
   }
 
   void _persistCapacitySamples() {
@@ -801,22 +939,23 @@ class RealBatteryService {
     final double coverage =
         (_capacitySampleCount / _highConfidenceSampleTarget).clamp(0, 1);
 
-    if (_capacitySamples.length < 3) {
+    final List<double> robustSamples = _trimmedSamples(_capacitySamples);
+    if (robustSamples.length < 3) {
       return (coverage * 0.85).clamp(0, 1).toDouble();
     }
 
-    final double mean = _capacitySamples.reduce((double a, double b) => a + b) /
-        _capacitySamples.length;
+    final double mean =
+        robustSamples.reduce((double a, double b) => a + b) / robustSamples.length;
     if (mean <= 0) {
       return (coverage * 0.85).clamp(0, 1).toDouble();
     }
 
     double variance = 0;
-    for (final double sample in _capacitySamples) {
+    for (final double sample in robustSamples) {
       final double delta = sample - mean;
       variance += delta * delta;
     }
-    variance /= _capacitySamples.length;
+    variance /= robustSamples.length;
     final double standardDeviation = sqrt(variance);
     final double coefficientOfVariation = standardDeviation / mean;
 
@@ -1011,8 +1150,15 @@ class RealBatteryService {
         (capacityHealth - statusAdjustment).clamp(0, 100).toDouble();
 
     final double confidence = _calculateHealthConfidence();
-    final double alpha = (0.05 + (confidence * 0.18)).clamp(0.05, 0.23);
-    _smoothedHealthPercentage += (targetHealth - _smoothedHealthPercentage) * alpha;
+    final double trust = ((confidence - _healthTrustConfidenceFloor) /
+            (1.0 - _healthTrustConfidenceFloor))
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final double trustedTarget =
+        (100.0 * (1.0 - trust)) + (targetHealth * trust);
+    final double alpha = (0.03 + (trust * 0.20)).clamp(0.03, 0.23);
+    _smoothedHealthPercentage +=
+        (trustedTarget - _smoothedHealthPercentage) * alpha;
     return _smoothedHealthPercentage.clamp(0, 100).toDouble();
   }
 
@@ -1153,6 +1299,7 @@ class RealBatteryService {
     _sessionChargedMah = 0;
     _sessionDischargedMah = 0;
     _lastChargeCounterMah = null;
+    _resetSessionTracking();
 
     _ewmaTemperatureC = 25;
     _ewmaVoltageV = 3.85;
