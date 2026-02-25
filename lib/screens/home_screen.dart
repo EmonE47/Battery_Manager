@@ -495,7 +495,7 @@ class _HomeScreenState extends State<HomeScreen>
                     },
                   ),
                   const SizedBox(height: 12),
-                  _kvRow('Health score', '${health.toStringAsFixed(1)}%'),
+                  _kvRow('Health score', '${capacityPercent.toStringAsFixed(1)}%'),
                   _kvRow(
                     'Confidence',
                     '${_batteryData.confidencePercentage.toStringAsFixed(0)}%',
